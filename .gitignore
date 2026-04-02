@@ -1,0 +1,8 @@
+node_modules/
+*.apk
+.env
+*.log
+conversation.json
+inbox.txt
+recv.log
+sent.log
