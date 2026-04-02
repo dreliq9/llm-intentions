@@ -10,9 +10,9 @@ LLM Intentions introduces a new kind of Android app: the **CapApp** (Capability 
 
 The **Hub** is the central gateway. It discovers installed CapApps via Android Intents, aggregates their tools into a single MCP endpoint, and namespaces them by source. Connect any MCP client — Claude, Grok, a custom agent — and your phone becomes an AI-native device.
 
-**Intent Mesh** takes it further: multiple LLMs can route work to each other through the same Intent layer. Claude delegates X/Twitter sentiment analysis to Grok. Grok sends structured data back. The phone becomes a multi-LLM orchestration bus.
-
 This isn't a spec or a proposal. It's a working system.
+
+**Coming next: Intent Mesh** — an experimental protocol for routing work between multiple LLMs on the same device. Early scripts and a draft spec are included in this repo.
 
 ## Architecture
 
@@ -43,7 +43,9 @@ This isn't a spec or a proposal. It's a working system.
             └───────────────┘
 ```
 
-### Intent Mesh — Multi-LLM Routing
+### Intent Mesh — Multi-LLM Routing (Experimental)
+
+> **Status: Early experiment.** The scripts work but the workflow is manual and rough. Included as a draft spec and proof of concept for where this is heading.
 
 ```
 ┌──────────────┐   PROCESS_TEXT    ┌──────────────┐
@@ -56,7 +58,7 @@ This isn't a spec or a proposal. It's a working system.
               Synthesized Alpha Signal
 ```
 
-Each LLM contributes what it's best at. Claude runs technical analysis via Taichi. Grok reads real-time X/Twitter sentiment. Intent Mesh merges both into a single signal.
+The idea: each LLM contributes what it's best at. Claude runs technical analysis via Taichi. Grok reads real-time X/Twitter sentiment. Intent Mesh merges both. Not production-ready yet, but the concept is proven.
 
 ## What's a CapApp?
 
@@ -91,7 +93,7 @@ Think of it like a microservice, but instead of HTTP endpoints, it exposes LLM t
 |---|---|---|
 | **Architecture** | Distributed CapApps + central Hub | Single MCP server |
 | **Extensibility** | Any APK can be a CapApp — install and go | Monolithic codebase |
-| **Multi-LLM** | Intent Mesh routes between LLMs | Single client model |
+| **Multi-LLM** | Intent Mesh (experimental) | Single client model |
 | **Tool count** | 118 tools across 8 sources | Spec-stage |
 | **Transport** | Android Intents (native IPC) | Android Intents |
 | **Discovery** | Automatic via AndroidMCP protocol | PackageManager query |
@@ -162,7 +164,7 @@ llm-intentions/
 ├── LICENSE                   # Apache 2.0
 ├── hub/                      # Hub proxy and bridge code
 ├── termux-mcp/               # Termux API → MCP server
-├── intent-mesh/              # Multi-LLM routing scripts
+├── intent-mesh/              # Multi-LLM routing (experimental)
 ├── capapps/
 │   └── template/             # Skeleton for building new CapApps
 ├── spec/

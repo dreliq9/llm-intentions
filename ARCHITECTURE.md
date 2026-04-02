@@ -29,18 +29,20 @@ The **Hub** is the central gateway. It:
 
 The Hub also maintains an **inbox** — messages sent to it via Android's share sheet appear as MCP-readable messages. This lets users push content from any Android app directly into an LLM conversation.
 
-### 3. Intent Mesh
+### 3. Intent Mesh (Experimental)
 
-**Intent Mesh** is a protocol for routing work between multiple LLMs through the Android Intent system and direct API calls.
+> **Status: Early experiment.** Scripts and a draft spec are included, but this is not a production-ready system yet.
+
+**Intent Mesh** is an experimental protocol for routing work between multiple LLMs through the Android Intent system and direct API calls.
 
 The core idea: different LLMs have different strengths. Claude excels at structured analysis. Grok has real-time access to X/Twitter. Rather than trying to make one LLM do everything, Intent Mesh lets them collaborate.
 
-Current implementation:
+Early experiments:
 - **Claude → Grok**: Via the xAI API, Claude sends analysis context and receives Grok's real-time sentiment data
-- **Clipboard bridge**: Legacy approach using Android's PROCESS_TEXT intent to send text to Grok, with clipboard monitoring for the return channel
+- **Clipboard bridge**: Using Android's PROCESS_TEXT intent to send text to Grok, with clipboard monitoring for the return channel
 - **Synthesis**: Both LLM outputs are merged into a single signal (e.g., technical analysis + social sentiment = trade thesis)
 
-See [spec/intent-mesh.md](spec/intent-mesh.md) for the protocol specification.
+The workflow is manual and rough today — the vision is automated multi-LLM orchestration. See [spec/intent-mesh.md](spec/intent-mesh.md) for the draft spec.
 
 ## System Topology
 

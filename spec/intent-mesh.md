@@ -2,7 +2,7 @@
 
 **Version:** 0.1.0
 **Date:** 2026-04-02
-**Status:** Working Draft — implemented and running in production
+**Status:** Experimental Draft — early proof of concept, not production-ready
 
 ## Abstract
 

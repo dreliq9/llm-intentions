@@ -1,4 +1,6 @@
-# Intent Mesh
+# Intent Mesh (Experimental)
+
+> **Status: Early experiment.** The scripts work but the workflow is manual and rough. This is a proof of concept for where multi-LLM routing is heading.
 
 Multi-LLM routing for Android. Route work between Claude, Grok, and other LLMs using Android Intents and direct API calls.
 
