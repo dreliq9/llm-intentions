@@ -87,6 +87,15 @@ Think of it like a microservice, but instead of HTTP endpoints, it exposes LLM t
 | `system.*` | 15 | Battery, clipboard, wifi, volume, torch, brightness, media control |
 | `hub.*` | 5 | Status, health, refresh, inbox (Android share → LLM) |
 
+## Platform Support
+
+| Platform | Hub | IPC Layer | Status |
+|----------|-----|-----------|--------|
+| **Android** | LLM Intentions Hub | Android Intents | Alpha — running in production |
+| **macOS** | LLM Intentions for Mac | Apple URL Schemes / Shortcuts | In development |
+
+Both versions expose tools over MCP via wifi, so your MCP client can talk to tools on any device on the network. Same protocol, native IPC on each platform.
+
 ## How It Differs from mobile-mcp
 
 | | LLM Intentions | mobile-mcp |
