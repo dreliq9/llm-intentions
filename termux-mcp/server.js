@@ -290,6 +290,6 @@ const httpServer = createServer(async (req, res) => {
   }
 });
 
-httpServer.listen(PORT, "0.0.0.0", () => {
-  console.error(`termux-mcp server listening on http://0.0.0.0:${PORT}/mcp`);
+httpServer.listen(PORT, "127.0.0.1", () => {
+  console.error(`termux-mcp server listening on http://127.0.0.1:${PORT}/mcp`);
 });

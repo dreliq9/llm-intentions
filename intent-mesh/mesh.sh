@@ -14,7 +14,7 @@
 #   Set XAI_API_KEY environment variable with your xAI API key.
 #   Set GROK_MODEL to override the default model (default: grok-3).
 
-MESH_DIR="/root/intent-mesh"
+MESH_DIR="${INTENT_MESH_DIR:-$HOME/intent-mesh}"
 CONVO_FILE="$MESH_DIR/conversation.json"
 LOG_FILE="$MESH_DIR/conversation.log"
 API_KEY="${XAI_API_KEY:?Set XAI_API_KEY environment variable}"
@@ -35,13 +35,13 @@ case "${1:-}" in
         [ -z "$MSG" ] && echo "Usage: mesh.sh send <message>" && exit 1
 
         # Single-shot: just user message, no history
-        RESP=$(curl -s "$API_URL" \
+        RESP=$(curl -sf --connect-timeout 10 --max-time 60 "$API_URL" \
             -H "Authorization: Bearer $API_KEY" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg model "$MODEL" --arg msg "$MSG" '{
                 model: $model,
                 messages: [{"role":"user","content":$msg}]
-            }')")
+            }')" 2>/dev/null) || { echo "ERROR: API request failed (network or auth error)" >&2; exit 1; }
 
         CONTENT=$(echo "$RESP" | jq -r '.choices[0].message.content // .error.message // "ERROR: no response"')
         echo "$CONTENT"
@@ -66,13 +66,13 @@ case "${1:-}" in
         echo "$HISTORY" > "$CONVO_FILE"
 
         # Send full history
-        RESP=$(curl -s "$API_URL" \
+        RESP=$(curl -s --connect-timeout 10 --max-time 60 "$API_URL" \
             -H "Authorization: Bearer $API_KEY" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg model "$MODEL" --argjson msgs "$HISTORY" '{
                 model: $model,
                 messages: $msgs
-            }')")
+            }')" 2>/dev/null) || { echo "ERROR: curl failed (network error)" >&2; exit 1; }
 
         CONTENT=$(echo "$RESP" | jq -r '.choices[0].message.content // .error.message // "ERROR: no response"')
         echo "$CONTENT"

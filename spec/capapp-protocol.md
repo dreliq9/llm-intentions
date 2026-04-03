@@ -23,12 +23,17 @@ The CapApp has no user-facing UI. It runs as a service, responding to structured
 
 ### 2.1 Manifest Declaration
 
-A CapApp declares itself as an MCP tool provider in its `AndroidManifest.xml`:
+A CapApp declares itself as an MCP tool provider in its `AndroidManifest.xml`. The service MUST be protected by a signature-level permission so that only the Hub (signed with the same key) can invoke it:
 
 ```xml
+<permission
+    android:name="com.llmintentions.permission.MCP_TOOL"
+    android:protectionLevel="signature" />
+
 <service
     android:name=".CommandGatewayService"
-    android:exported="true">
+    android:exported="true"
+    android:permission="com.llmintentions.permission.MCP_TOOL">
     <intent-filter>
         <action android:name="com.llmintentions.ACTION_MCP_TOOL" />
         <category android:name="android.intent.category.DEFAULT" />

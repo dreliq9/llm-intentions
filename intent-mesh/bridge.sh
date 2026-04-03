@@ -8,13 +8,19 @@
 #
 # Usage: bash bridge.sh [poll_interval_seconds]
 
-MESH_DIR="/root/intent-mesh"
+MESH_DIR="${INTENT_MESH_DIR:-$HOME/intent-mesh}"
 INBOX="$MESH_DIR/inbox.txt"
 RECV_LOG="$MESH_DIR/recv.log"
 POLL="${1:-3}"
 
 mkdir -p "$MESH_DIR"
 touch "$RECV_LOG"
+
+# Verify Termux:API is available
+if ! command -v termux-clipboard-get &>/dev/null; then
+    echo "[bridge] ERROR: termux-clipboard-get not found. Install Termux:API." >&2
+    exit 1
+fi
 
 # Snapshot current clipboard as baseline
 LAST_CLIP=$(termux-clipboard-get 2>/dev/null || echo "")
