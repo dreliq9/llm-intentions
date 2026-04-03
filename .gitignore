@@ -1,0 +1,21 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+local.properties
+
+# Android build artifacts
+llm-intentions/.cxx/
+llm-intentions/build/
+mcp-core/build/
+taichi/build/
+
+# OS
+.DS_Store
+
+# Findings (review notes, not source)
+findings.md

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Shared/external storage — files Claude Code writes via Termux -->
+    <external-path name="external" path="." />
+
+    <!-- App-private cache — temp files from base64 decode -->
+    <cache-path name="cache" path="mcp_share/" />
+</paths>
