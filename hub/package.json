@@ -1,0 +1,10 @@
+{
+  "name": "llm-intentions-hub-proxy",
+  "version": "1.0.0",
+  "description": "MCP SDK proxy bridge to the LLM Intentions Hub",
+  "main": "hub-proxy.js",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.12.0"
+  }
+}

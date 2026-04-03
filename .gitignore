@@ -14,8 +14,22 @@ llm-intentions/build/
 mcp-core/build/
 taichi/build/
 
+# Node
+node_modules/
+
 # OS
 .DS_Store
 
-# Findings (review notes, not source)
+# Binaries & logs
+*.apk
+*.log
+.env
+
+# Runtime state
+conversation.json
+inbox.txt
+recv.log
+sent.log
+
+# Review notes
 findings.md
