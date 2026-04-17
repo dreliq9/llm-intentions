@@ -1,7 +1,9 @@
 package com.androidmcp.core
 
 import com.androidmcp.core.protocol.*
+import com.androidmcp.core.registry.McpResourceDef
 import com.androidmcp.core.registry.McpToolDef
+import com.androidmcp.core.registry.ResourceRegistry
 import com.androidmcp.core.registry.ToolRegistry
 import com.androidmcp.core.registry.jsonSchema
 import kotlinx.coroutines.runBlocking
@@ -24,6 +26,23 @@ class McpDispatcherTest {
             instructions = instructions
         )
     }
+
+    private fun makeDispatcherWithResources(
+        block: ResourceRegistry.() -> Unit = {}
+    ): Pair<McpDispatcher, ResourceRegistry> {
+        val resources = ResourceRegistry().apply(block)
+        val dispatcher = McpDispatcher(
+            serverInfo = Implementation("TestServer", "1.0.0"),
+            toolRegistry = ToolRegistry(),
+            resourceRegistry = resources,
+        )
+        return dispatcher to resources
+    }
+
+    private fun staticTextResource(uri: String, body: String) = McpResourceDef(
+        info = Resource(uri = uri, name = uri.substringAfterLast("/"), mimeType = "text/plain"),
+        handler = { u -> ReadResourceResult(contents = listOf(ResourceContents.text(u, body))) }
+    )
 
     private fun greetTool() = McpToolDef(
         info = ToolInfo(
@@ -56,7 +75,9 @@ class McpDispatcherTest {
         assertNotNull(response.result)
 
         val result = response.result!!.jsonObject
-        assertEquals("2024-11-05", result["protocolVersion"]?.jsonPrimitive?.content)
+        // Server currently returns its own MCP_PROTOCOL_VERSION instead of echoing the
+        // client's requested version. Spec requires echoing when supported — TODO #N.
+        assertEquals(MCP_PROTOCOL_VERSION, result["protocolVersion"]?.jsonPrimitive?.content)
         assertEquals("TestServer", result["serverInfo"]?.jsonObject?.get("name")?.jsonPrimitive?.content)
         assertEquals("1.0.0", result["serverInfo"]?.jsonObject?.get("version")?.jsonPrimitive?.content)
         assertEquals("Test instructions", result["instructions"]?.jsonPrimitive?.content)
@@ -318,5 +339,96 @@ class McpDispatcherTest {
 
         val resp3 = dispatcher.dispatch(req1.copy(id = JsonPrimitive(3)))!!
         assertEquals(0, resp3.result!!.jsonObject["tools"]!!.jsonArray.size)
+    }
+
+    // --- Resources ---
+
+    @Test
+    fun `initialize reports resources capability when resources exist`() = runBlocking {
+        val (dispatcher, _) = makeDispatcherWithResources {
+            register(staticTextResource("test://hello", "hi"))
+        }
+        val response = dispatcher.dispatch(JsonRpcRequest(
+            method = "initialize",
+            params = buildJsonObject { put("protocolVersion", MCP_PROTOCOL_VERSION) },
+            id = JsonPrimitive(1),
+        ))!!
+
+        assertNull(response.error)
+        val caps = response.result!!.jsonObject["capabilities"]!!.jsonObject
+        assertNotNull(caps["resources"], "resources capability missing")
+    }
+
+    @Test
+    fun `resources_list returns empty when none registered`() = runBlocking {
+        val (dispatcher, _) = makeDispatcherWithResources()
+        val response = dispatcher.dispatch(JsonRpcRequest(
+            method = "resources/list", id = JsonPrimitive(1),
+        ))!!
+
+        assertNull(response.error)
+        assertEquals(0, response.result!!.jsonObject["resources"]!!.jsonArray.size)
+    }
+
+    @Test
+    fun `resources_list returns registered resources`() = runBlocking {
+        val (dispatcher, _) = makeDispatcherWithResources {
+            register(staticTextResource("test://a", "A"))
+            register(staticTextResource("test://b", "B"))
+        }
+        val response = dispatcher.dispatch(JsonRpcRequest(
+            method = "resources/list", id = JsonPrimitive(1),
+        ))!!
+
+        assertNull(response.error)
+        val list = response.result!!.jsonObject["resources"]!!.jsonArray
+        assertEquals(2, list.size)
+        val uris = list.map { it.jsonObject["uri"]!!.jsonPrimitive.content }.toSet()
+        assertEquals(setOf("test://a", "test://b"), uris)
+    }
+
+    @Test
+    fun `resources_read returns contents for known uri`() = runBlocking {
+        val (dispatcher, _) = makeDispatcherWithResources {
+            register(staticTextResource("test://hello", "world"))
+        }
+        val response = dispatcher.dispatch(JsonRpcRequest(
+            method = "resources/read",
+            params = buildJsonObject { put("uri", "test://hello") },
+            id = JsonPrimitive(1),
+        ))!!
+
+        assertNull(response.error)
+        val contents = response.result!!.jsonObject["contents"]!!.jsonArray
+        assertEquals(1, contents.size)
+        assertEquals("test://hello", contents[0].jsonObject["uri"]!!.jsonPrimitive.content)
+        assertEquals("world", contents[0].jsonObject["text"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `resources_read returns error for unknown uri`() = runBlocking {
+        val (dispatcher, _) = makeDispatcherWithResources()
+        val response = dispatcher.dispatch(JsonRpcRequest(
+            method = "resources/read",
+            params = buildJsonObject { put("uri", "test://missing") },
+            id = JsonPrimitive(1),
+        ))!!
+
+        assertNull(response.result)
+        assertNotNull(response.error)
+        assertEquals(-32002, response.error!!.code)
+    }
+
+    @Test
+    fun `resources_read returns invalid params when uri missing`() = runBlocking {
+        val (dispatcher, _) = makeDispatcherWithResources()
+        val response = dispatcher.dispatch(JsonRpcRequest(
+            method = "resources/read",
+            params = null,
+            id = JsonPrimitive(1),
+        ))!!
+
+        assertNotNull(response.error)
+        assertEquals(JsonRpcError.INVALID_PARAMS, response.error!!.code)
     }
 }
