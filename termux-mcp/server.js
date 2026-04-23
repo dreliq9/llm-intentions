@@ -5,9 +5,22 @@ import { z } from "zod";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer } from "node:http";
+import { textTool } from "./envelope.js";
 
 const exec = promisify(execFile);
 const TIMEOUT = 30000;
+
+/** Like run(), but throws on non-zero exit or subprocess error. */
+async function runOrThrow(cmd, args = [], input) {
+  const opts = {
+    timeout: TIMEOUT,
+    maxBuffer: 1024 * 1024,
+    env: { ...process.env, TMPDIR: process.env.TMPDIR || "/data/data/com.termux/files/usr/tmp" },
+  };
+  if (input) opts.input = input;
+  const { stdout, stderr } = await exec(cmd, args, opts);  // exec is already defined via promisify(execFile); throws on non-zero
+  return stdout || stderr || "(no output)";
+}
 
 async function run(cmd, args = [], input) {
   const opts = {
@@ -45,9 +58,23 @@ server.tool("clipboard_get", "Get current clipboard contents", {}, async () => {
   return { content: [{ type: "text", text: out }] };
 });
 
-server.tool("clipboard_set", "Set clipboard contents", { text: z.string().describe("Text to copy to clipboard") }, async ({ text }) => {
-  const out = await run("termux-clipboard-set", [text]);
-  return { content: [{ type: "text", text: out || "Clipboard set." }] };
+textTool(server, {
+  name: "clipboard_set",
+  description: "Set clipboard contents",
+  schema: {
+    text: z.string().describe("Text to copy to clipboard"),
+  },
+  metadata: {
+    destructive: true,
+    idempotent: true,
+    latencyClass: "FAST",
+    permissions: [],
+    failureModes: [
+      { pattern: "cannot access clipboard|not allowed", hint: "Some secure keyboards block clipboard_set. Ask the user to switch keyboard." },
+    ],
+  },
+}, async ({ text }) => {
+  return (await runOrThrow("termux-clipboard-set", [text])) || "Clipboard set.";
 });
 
 // ── Contacts ─────────────────────────────────────────────
@@ -66,12 +93,25 @@ server.tool("sms_list", "List SMS messages", {
   return { content: [{ type: "text", text: tryParseJSON(out) }] };
 });
 
-server.tool("sms_send", "Send an SMS message", {
-  number: z.string().describe("Phone number to send to"),
-  text: z.string().describe("Message text"),
+textTool(server, {
+  name: "sms_send",
+  description: "Send an SMS message",
+  schema: {
+    number: z.string().describe("Phone number to send to"),
+    text: z.string().describe("Message text"),
+  },
+  metadata: {
+    destructive: true,
+    idempotent: false,
+    latencyClass: "SLOW",
+    permissions: ["SEND_SMS"],
+    failureModes: [
+      { pattern: "permission denied|not default", hint: "Termux must be the default SMS app, or grant SEND_SMS permission." },
+      { pattern: "invalid (number|phone)", hint: "Pass a fully-qualified phone number (country code + digits only)." },
+    ],
+  },
 }, async ({ number, text }) => {
-  const out = await run("termux-sms-send", ["-n", number], text);
-  return { content: [{ type: "text", text: out || "SMS sent." }] };
+  return (await runOrThrow("termux-sms-send", ["-n", number], text)) || "SMS sent.";
 });
 
 // ── Call Log ─────────────────────────────────────────────
@@ -84,23 +124,48 @@ server.tool("call_log", "List recent call history", {
 });
 
 // ── Location ─────────────────────────────────────────────
-server.tool("location", "Get current GPS/network location", {
-  provider: z.enum(["gps", "network", "passive"]).default("network").describe("Location provider"),
+textTool(server, {
+  name: "location",
+  description: "Get current GPS/network location",
+  schema: {
+    provider: z.enum(["gps", "network", "passive"]).default("network").describe("Location provider"),
+  },
+  metadata: {
+    destructive: false,
+    idempotent: true,
+    latencyClass: "SLOW",
+    permissions: ["ACCESS_FINE_LOCATION"],
+    failureModes: [
+      { pattern: "provider disabled|location off", hint: "Enable Location Services in System Settings." },
+      { pattern: "timeout", hint: "GPS can take 30s indoors; retry outside or use provider=network." },
+    ],
+  },
 }, async ({ provider }) => {
-  const out = await run("termux-location", ["-p", provider], undefined);
-  return { content: [{ type: "text", text: tryParseJSON(out) }] };
+  return await runOrThrow("termux-location", ["-p", provider]);
 });
 
 // ── Notifications ────────────────────────────────────────
-server.tool("notification_send", "Show a notification on the device", {
-  title: z.string().describe("Notification title"),
-  content: z.string().describe("Notification body text"),
-  id: z.string().optional().describe("Notification ID (for updating)"),
+textTool(server, {
+  name: "notification_send",
+  description: "Show a notification on the device",
+  schema: {
+    title: z.string().describe("Notification title"),
+    content: z.string().describe("Notification body text"),
+    id: z.string().optional().describe("Notification ID (for updating)"),
+  },
+  metadata: {
+    destructive: true,
+    idempotent: true,
+    latencyClass: "FAST",
+    permissions: ["POST_NOTIFICATIONS"],
+    failureModes: [
+      { pattern: "permission", hint: "Grant POST_NOTIFICATIONS to Termux." },
+    ],
+  },
 }, async ({ title, content, id }) => {
   const args = ["-t", title, "-c", content];
   if (id) args.push("-i", id);
-  const out = await run("termux-notification", args);
-  return { content: [{ type: "text", text: out || "Notification sent." }] };
+  return (await runOrThrow("termux-notification", args)) || "Notification sent.";
 });
 
 server.tool("notification_list", "List all active notifications on the device", {}, async () => {
@@ -109,20 +174,44 @@ server.tool("notification_list", "List all active notifications on the device", 
 });
 
 // ── Camera ───────────────────────────────────────────────
-server.tool("camera_photo", "Take a photo with the device camera", {
-  camera: z.enum(["0", "1"]).default("0").describe("Camera ID: 0=back, 1=front"),
-  output: z.string().default("/data/data/com.termux/files/home/photo.jpg").describe("Output file path"),
+textTool(server, {
+  name: "camera_photo",
+  description: "Take a photo with the device camera",
+  schema: {
+    camera: z.enum(["0", "1"]).default("0").describe("Camera ID: 0=back, 1=front"),
+    output: z.string().default("/data/data/com.termux/files/home/photo.jpg").describe("Output file path"),
+  },
+  metadata: {
+    destructive: true,
+    idempotent: false,
+    latencyClass: "SLOW",
+    permissions: ["CAMERA"],
+    failureModes: [
+      { pattern: "(No such|doesn't exist) device|Camera (error|unavailable)", hint: "No camera available (emulator?). Use termux-camera-info to list lenses." },
+    ],
+  },
 }, async ({ camera, output }) => {
-  const out = await run("termux-camera-photo", ["-c", camera, output]);
-  return { content: [{ type: "text", text: out || `Photo saved to ${output}` }] };
+  return (await runOrThrow("termux-camera-photo", ["-c", camera, output])) || `Photo saved to ${output}`;
 });
 
 // ── TTS / Audio ──────────────────────────────────────────
-server.tool("tts_speak", "Speak text aloud using text-to-speech", {
-  text: z.string().describe("Text to speak"),
+textTool(server, {
+  name: "tts_speak",
+  description: "Speak text aloud using text-to-speech",
+  schema: {
+    text: z.string().describe("Text to speak"),
+  },
+  metadata: {
+    destructive: true,
+    idempotent: false,
+    latencyClass: "SLOW",
+    permissions: [],
+    failureModes: [
+      { pattern: "no tts engine|TTS init", hint: "No TTS engine installed; install one from Play Store." },
+    ],
+  },
 }, async ({ text }) => {
-  const out = await run("termux-tts-speak", [], text);
-  return { content: [{ type: "text", text: out || "Spoken." }] };
+  return (await runOrThrow("termux-tts-speak", [], text)) || "Spoken.";
 });
 
 server.tool("volume", "Get or set audio volume", {
