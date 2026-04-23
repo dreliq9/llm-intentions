@@ -74,9 +74,11 @@ abstract class ToolAppService : Service() {
 
         val toolDef = registry.get(toolName)
         if (toolDef == null) {
-            sendResult(replyTo, callbackId, isError = true,
-                data = json.encodeToString(ToolCallResult.serializer(),
-                    ToolCallResult(content = listOf(ContentBlock.text("Tool not found: $toolName")), isError = true)))
+            val env = com.androidmcp.core.protocol.Envelope.fail(
+                summary = "Tool not found: $toolName",
+                hint = "Check tools/list for available names in this CapApp's namespace.",
+            )
+            sendEnvelope(replyTo, callbackId, env)
             return
         }
 
@@ -84,16 +86,37 @@ abstract class ToolAppService : Service() {
             try {
                 val args = json.parseToJsonElement(argsJson).jsonObject
                 val result = toolDef.handler(args)
-                sendResult(replyTo, callbackId,
+                // Handler already returned a ToolCallResult whose text content is envelope-rendered
+                // (via textTool / envelopeTool). Forward as-is.
+                sendResult(
+                    replyTo = replyTo,
+                    callbackId = callbackId,
                     isError = result.isError,
-                    data = json.encodeToString(ToolCallResult.serializer(), result))
+                    data = json.encodeToString(com.androidmcp.core.protocol.ToolCallResult.serializer(), result),
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "Tool execution failed: $toolName", e)
-                sendResult(replyTo, callbackId, isError = true,
-                    data = json.encodeToString(ToolCallResult.serializer(),
-                        ToolCallResult(content = listOf(ContentBlock.text("Error: ${e.message}")), isError = true)))
+                val env = com.androidmcp.core.protocol.Envelope.fromException(
+                    toolName = toolName,
+                    metadata = toolDef.metadata,
+                    exception = e,
+                )
+                sendEnvelope(replyTo, callbackId, env)
             }
         }
+    }
+
+    private fun sendEnvelope(replyTo: String, callbackId: String, env: com.androidmcp.core.protocol.Envelope) {
+        val result = com.androidmcp.core.protocol.ToolCallResult(
+            content = listOf(com.androidmcp.core.protocol.ContentBlock.text(env.renderText())),
+            isError = env.status == com.androidmcp.core.protocol.EnvelopeStatus.FAIL,
+        )
+        sendResult(
+            replyTo = replyTo,
+            callbackId = callbackId,
+            isError = result.isError,
+            data = json.encodeToString(com.androidmcp.core.protocol.ToolCallResult.serializer(), result),
+        )
     }
 
     private fun handleListTools(intent: Intent) {
@@ -147,22 +170,3 @@ abstract class ToolAppService : Service() {
     }
 }
 
-/**
- * Convenience extension: register a tool that returns a text string.
- * Wraps the string result in ToolCallResult automatically.
- */
-fun ToolRegistry.textTool(
-    name: String,
-    description: String,
-    params: JsonObject,
-    handler: suspend (JsonObject) -> String
-) {
-    register(com.androidmcp.core.registry.McpToolDef(
-        info = com.androidmcp.core.protocol.ToolInfo(name = name, description = description, inputSchema = params),
-        handler = { args ->
-            com.androidmcp.core.protocol.ToolCallResult(
-                content = listOf(com.androidmcp.core.protocol.ContentBlock.text(handler(args)))
-            )
-        }
-    ))
-}

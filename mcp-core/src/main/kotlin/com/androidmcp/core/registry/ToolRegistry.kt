@@ -8,7 +8,8 @@ import kotlinx.serialization.json.*
  */
 data class McpToolDef(
     val info: ToolInfo,
-    val handler: suspend (JsonObject) -> ToolCallResult
+    val metadata: ToolMetadata? = null,
+    val handler: suspend (JsonObject) -> ToolCallResult,
 )
 
 /**
@@ -96,4 +97,57 @@ class JsonSchemaBuilder {
 
 fun jsonSchema(block: JsonSchemaBuilder.() -> Unit): JsonObject {
     return JsonSchemaBuilder().apply(block).build()
+}
+
+/**
+ * Register a tool whose handler returns a raw String. The string is wrapped in an
+ * OK envelope and rendered as MCP text content. On uncaught exception, the framework
+ * (ToolAppService) converts it to a FAIL envelope using the failure_modes in metadata.
+ */
+fun ToolRegistry.textTool(
+    name: String,
+    description: String,
+    params: JsonObject,
+    metadata: ToolMetadata? = null,
+    handler: suspend (JsonObject) -> String,
+) {
+    register(McpToolDef(
+        info = ToolInfo(name = name, description = description, inputSchema = params),
+        metadata = metadata,
+        handler = { args ->
+            val text = handler(args)
+            val env = Envelope.ok(
+                summary = "$name succeeded",
+                data = JsonObject(mapOf("output" to JsonPrimitive(text))),
+            )
+            ToolCallResult(
+                content = listOf(ContentBlock.text(env.renderText())),
+                isError = false,
+            )
+        },
+    ))
+}
+
+/**
+ * Register a tool whose handler produces an Envelope directly — useful when the tool
+ * wants to emit a recoverable WARN or a specific FAIL with hint, rather than throwing.
+ */
+fun ToolRegistry.envelopeTool(
+    name: String,
+    description: String,
+    params: JsonObject,
+    metadata: ToolMetadata? = null,
+    handler: suspend (JsonObject) -> Envelope,
+) {
+    register(McpToolDef(
+        info = ToolInfo(name = name, description = description, inputSchema = params),
+        metadata = metadata,
+        handler = { args ->
+            val env = handler(args)
+            ToolCallResult(
+                content = listOf(ContentBlock.text(env.renderText())),
+                isError = env.status == EnvelopeStatus.FAIL,
+            )
+        },
+    ))
 }

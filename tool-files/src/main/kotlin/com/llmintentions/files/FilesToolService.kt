@@ -8,7 +8,7 @@ import android.provider.MediaStore
 import com.androidmcp.core.registry.ToolRegistry
 import com.androidmcp.core.registry.jsonSchema
 import com.androidmcp.intent.ToolAppService
-import com.androidmcp.intent.textTool
+import com.androidmcp.core.registry.textTool
 import kotlinx.serialization.json.*
 import java.io.File
 import java.text.SimpleDateFormat

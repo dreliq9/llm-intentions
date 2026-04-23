@@ -7,7 +7,7 @@ import android.provider.CalendarContract
 import android.provider.ContactsContract
 import com.androidmcp.core.registry.ToolRegistry
 import com.androidmcp.core.registry.jsonSchema
-import com.androidmcp.intent.textTool
+import com.androidmcp.core.registry.textTool
 import kotlinx.serialization.json.*
 import java.text.SimpleDateFormat
 import java.util.*

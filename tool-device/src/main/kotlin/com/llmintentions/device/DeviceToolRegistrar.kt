@@ -20,7 +20,7 @@ import android.app.ActivityManager
 import android.os.Environment
 import com.androidmcp.core.registry.ToolRegistry
 import com.androidmcp.core.registry.jsonSchema
-import com.androidmcp.intent.textTool
+import com.androidmcp.core.registry.textTool
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.*
