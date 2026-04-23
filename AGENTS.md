@@ -112,3 +112,47 @@ The Hub is curated. If you need a raw Android API no CapApp exposes, tell the us
 - `people.sms_*`, `people.contacts_write`, `people.calendar_create_event` — only on explicit user request.
 - `hub.claude` — consumes the user's Claude subscription budget; confirm before routing work there.
 - Anything marked destructive above.
+
+---
+
+## For CapApp authors
+
+If you're writing a CapApp (a new tool provider), the framework takes care of envelope rendering — but only if you let it see your failures. Two rules:
+
+### 1. Throw on hard errors. Don't catch-and-return-error-string.
+
+**Wrong** (silent success — framework wraps the error string as `OK: my_tool succeeded`):
+
+```kotlin
+registry.textTool("my_tool", "...", params) { args ->
+    try {
+        doWork(args)
+    } catch (e: Exception) {
+        "Error: ${e.message}"
+    }
+}
+```
+
+**Right** (framework sees the exception and produces `FAIL: my_tool failed: <message>` + hint from your metadata.failureModes):
+
+```kotlin
+registry.textTool(
+    name = "my_tool",
+    description = "...",
+    params = jsonSchema { /* ... */ },
+    metadata = toolMetadata {
+        failureMode(
+            pattern = "sensor unavailable",
+            hint = "This sensor isn't on this device — check device.sensor_list first.",
+        )
+    },
+) { args ->
+    doWork(args)   // let exceptions propagate
+}
+```
+
+If you genuinely want to produce a `WARN` (partial success) or a specific `FAIL` without throwing, use `envelopeTool` instead of `textTool` and return `Envelope.warn(...)` / `Envelope.fail(...)` directly. See `llm-intentions/.../HubMetaTools.kt::registerClaude` for a worked example.
+
+### 2. Ship metadata with every tool that can fail.
+
+`toolMetadata { failureMode(pattern = "...", hint = "...") }` turns an opaque FAIL into a self-healing hint for the LLM. Patterns are regex-matched against the thrown exception's message; `exceptionType` matches the simple class name or canonical name. See `tool-files-dev/FilesDevToolRegistrar.kt` for the canonical backfill pattern.
