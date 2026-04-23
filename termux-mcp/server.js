@@ -226,6 +226,59 @@ server.tool("fingerprint", "Authenticate via fingerprint sensor", {}, async () =
   return { content: [{ type: "text", text: tryParseJSON(out) }] };
 });
 
+// ── Claude Code relay ────────────────────────────────────
+const CLAUDE_TIMEOUT = 300000; // 5 minutes max for Claude responses
+
+async function handleClaude(req, res) {
+  try {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+
+    const message = body.message;
+    if (!message) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "message is required" }));
+      return;
+    }
+
+    const args = ["-p", "--output-format", "json"];
+
+    if (body.resume_session) {
+      args.push("--resume", body.resume_session);
+    }
+    if (body.system_prompt) {
+      args.push("--append-system-prompt", body.system_prompt);
+    }
+    if (body.model) {
+      args.push("--model", body.model);
+    }
+
+    args.push(message);
+
+    const { stdout, stderr } = await exec("claude", args, {
+      timeout: body.timeout_ms || CLAUDE_TIMEOUT,
+      maxBuffer: 10 * 1024 * 1024, // 10MB for long responses
+      env: {
+        ...process.env,
+        TMPDIR: process.env.TMPDIR || "/data/data/com.termux/files/usr/tmp",
+      },
+    });
+
+    // claude --output-format json returns a JSON object
+    const result = stdout || stderr || '{"error": "no output"}';
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(result);
+  } catch (e) {
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      error: e.message,
+      killed: e.killed || false,
+      signal: e.signal || null,
+    }));
+  }
+}
+
 // ── Permission approval endpoint (for remote Claude Code hooks) ──
 const APPROVE_TIMEOUT = 120000; // 2 minutes to respond
 
@@ -276,7 +329,9 @@ async function handleApprove(req, res) {
 const PORT = 8378;
 
 const httpServer = createServer(async (req, res) => {
-  if (req.url === "/approve" && req.method === "POST") {
+  if (req.url === "/claude" && req.method === "POST") {
+    await handleClaude(req, res);
+  } else if (req.url === "/approve" && req.method === "POST") {
     await handleApprove(req, res);
   } else if (req.url === "/mcp" && req.method === "POST") {
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
