@@ -1,11 +1,15 @@
 package com.taichi.tools
 
 import com.androidmcp.core.protocol.ContentBlock
+import com.androidmcp.core.protocol.LatencyClass
 import com.androidmcp.core.protocol.ToolCallResult
 import com.androidmcp.core.protocol.ToolInfo
+import com.androidmcp.core.protocol.ToolMetadata
 import com.androidmcp.core.registry.McpToolDef
 import com.androidmcp.core.registry.ToolRegistry
 import com.androidmcp.core.registry.jsonSchema
+import com.androidmcp.core.registry.textTool
+import com.androidmcp.core.registry.toolMetadata
 import com.androidmcp.intent.ToolAppService
 import com.taichi.analyzer.*
 import com.taichi.config.ApiKeyStore
@@ -45,9 +49,19 @@ class TaichiToolService : ToolAppService() {
 
         // --- search_token ---
         registry.textTool(
-            "search_token",
-            "Search for a crypto token across DEX aggregators (DexScreener + GeckoTerminal)",
-            jsonSchema { string("query", "Token name, symbol, or address") }
+            name = "search_token",
+            description = "Search for a crypto token across DEX aggregators (DexScreener + GeckoTerminal)",
+            params = jsonSchema { string("query", "Token name, symbol, or address") },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.SLOW
+                failureMode(pattern = "rate limit|429", hint = "Search API rate-limited; wait and retry.")
+                failureMode(pattern = "empty query|missing query", hint = "Provide a non-empty query (symbol, name, or address).")
+                example(intent = "Resolve the ETH token.") { args ->
+                    args["query"] = "ETH"
+                }
+            },
         ) { args ->
             val query = args["query"]?.jsonPrimitive?.content ?: ""
             val result = bridge.searchToken(query)
@@ -67,15 +81,28 @@ class TaichiToolService : ToolAppService() {
 
         // --- fetch_ohlcv ---
         registry.textTool(
-            "fetch_ohlcv",
-            "Fetch OHLCV candlestick data. Tries Binance first, then GeckoTerminal, then DexPaprika.",
-            jsonSchema {
+            name = "fetch_ohlcv",
+            description = "Fetch OHLCV candlestick data. Tries Binance first, then GeckoTerminal, then DexPaprika.",
+            params = jsonSchema {
                 string("symbol", "Token symbol (e.g., ETH, BTC)")
                 string("timeframe", "Candle timeframe: 1m, 5m, 15m, 1h, 4h, 1d", required = false)
                 integer("limit", "Number of candles (default 200)", required = false)
                 string("network", "Network for DEX data (e.g., eth, solana)", required = false)
                 string("pool_address", "Specific pool address for DEX data", required = false)
-            }
+            },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.SLOW
+                failureMode(pattern = "rate limit|429", hint = "Pricing API rate-limited; wait ~30s and retry.")
+                failureMode(exceptionType = "SocketTimeoutException", hint = "Network timeout — retry, or check device connectivity.")
+                failureMode(pattern = "unknown symbol|not supported", hint = "Call search_token first to resolve the symbol.")
+                example(intent = "Get the last 100 15-minute ETH candles.") { args ->
+                    args["symbol"] = "ETH"
+                    args["interval"] = "15m"
+                    args["limit"] = 100
+                }
+            },
         ) { args ->
             val symbol = args["symbol"]?.jsonPrimitive?.content ?: ""
             val timeframe = args["timeframe"]?.jsonPrimitive?.contentOrNull ?: "1h"
@@ -173,13 +200,22 @@ class TaichiToolService : ToolAppService() {
 
         // --- technical_analysis ---
         registry.textTool(
-            "technical_analysis",
-            "Run full technical analysis (RSI, MACD, BBands, ATR, OBV, EMA, StochRSI, VWAP) on a token. Returns indicators, signals, and bullish/bearish summary.",
-            jsonSchema {
+            name = "technical_analysis",
+            description = "Run full technical analysis (RSI, MACD, BBands, ATR, OBV, EMA, StochRSI, VWAP) on a token. Returns indicators, signals, and bullish/bearish summary.",
+            params = jsonSchema {
                 string("symbol", "Token symbol (e.g., ETH, BTC)")
                 string("timeframe", "Candle timeframe (default: 1h)", required = false)
                 integer("limit", "Number of candles (default: 200)", required = false)
-            }
+            },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.SLOW
+                failureMode(pattern = "no data|empty candles", hint = "Call fetch_ohlcv for this symbol first.")
+                example(intent = "Run TA on recent ETH data.") { args ->
+                    args["symbol"] = "ETH"
+                }
+            },
         ) { args ->
             val symbol = args["symbol"]?.jsonPrimitive?.content ?: ""
             val timeframe = args["timeframe"]?.jsonPrimitive?.contentOrNull ?: "1h"
@@ -224,15 +260,24 @@ class TaichiToolService : ToolAppService() {
 
         // --- entry_gate ---
         registry.textTool(
-            "entry_gate",
-            "Check the 4-gate entry checklist: (1) positive EV, (2) Kelly > 0, (3) conviction >= 60, (4) regime approval. Returns CLEAR_TO_TRADE, PROCEED_WITH_CAUTION, or DO_NOT_TRADE.",
-            jsonSchema {
+            name = "entry_gate",
+            description = "Check the 4-gate entry checklist: (1) positive EV, (2) Kelly > 0, (3) conviction >= 60, (4) regime approval. Returns CLEAR_TO_TRADE, PROCEED_WITH_CAUTION, or DO_NOT_TRADE.",
+            params = jsonSchema {
                 number("ev_per_trade", "Expected value per trade from backtest")
                 number("kelly_fraction", "Kelly criterion fraction (0-1)")
                 integer("conviction_score", "Conviction score from deep scan (0-100)")
                 string("regime", "Current market regime (trending, compression, choppy, etc.)")
                 string("signal_strength", "From signal_hierarchy: strong, moderate, weak, conflicted", required = false)
-            }
+            },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.FAST
+                failureMode(pattern = "missing|required", hint = "Provide symbol plus TA signals (rsi, macd, trend).")
+                example(intent = "Check whether to enter ETH based on current signals.") { args ->
+                    args["symbol"] = "ETH"
+                }
+            },
         ) { args ->
             val result = SignalHierarchy.checkEntryGate(
                 evPerTrade = args["ev_per_trade"]?.jsonPrimitive?.doubleOrNull,
@@ -274,16 +319,35 @@ class TaichiToolService : ToolAppService() {
 
         // --- paper_trade ---
         registry.textTool(
-            "paper_trade",
-            "Execute a paper trade (buy, sell, short, or cover). Uses live DEX/CEX pricing. 0.1% fee per trade. Shorts simulate margin with collateral, funding rates, and liquidation.",
-            jsonSchema {
+            name = "paper_trade",
+            description = "Execute a paper trade (buy, sell, short, or cover). Uses live DEX/CEX pricing. 0.1% fee per trade. Shorts simulate margin with collateral, funding rates, and liquidation.",
+            params = jsonSchema {
                 string("symbol", "Token symbol (e.g., ETH, BTC)")
-                string("action", "buy (open long), sell (close long), short (open short), or cover (close short)")
+                enum("action", "buy (open long), sell (close long), short (open short), or cover (close short)",
+                    values = listOf("buy", "sell", "short", "cover"))
                 number("amount_usd", "USD amount (for buys and shorts)", required = false)
                 number("quantity", "Token quantity (for sells/covers, or specific amount)", required = false)
                 boolean("close_all", "Close entire position (for sells/covers)", required = false)
                 number("leverage", "Leverage for shorts (default: 1.0)", required = false)
-            }
+            },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = false
+                latencyClass = LatencyClass.SLOW
+                failureMode(pattern = "unknown symbol|symbol not found|not supported", hint = "Call search_token first to resolve the symbol.")
+                failureMode(pattern = "insufficient", hint = "Check paper_portfolio for available cash; reduce amount_usd.")
+                failureMode(exceptionType = "SocketTimeoutException", hint = "Pricing request timed out; retry in a few seconds.")
+                example(intent = "Open a \$100 long on ETH.") { args ->
+                    args["symbol"] = "ETH"
+                    args["action"] = "buy"
+                    args["amount_usd"] = 100.0
+                }
+                example(intent = "Close all of the ETH position.") { args ->
+                    args["symbol"] = "ETH"
+                    args["action"] = "sell"
+                    args["close_all"] = true
+                }
+            },
         ) { args ->
             val symbol = args["symbol"]?.jsonPrimitive?.content ?: ""
             val action = args["action"]?.jsonPrimitive?.content ?: ""
@@ -310,9 +374,15 @@ class TaichiToolService : ToolAppService() {
 
         // --- paper_portfolio ---
         registry.textTool(
-            "paper_portfolio",
-            "View paper trading portfolio: cash, open positions with live prices and unrealized PnL, total value, win rate, fees.",
-            jsonSchema { }
+            name = "paper_portfolio",
+            description = "View paper trading portfolio: cash, open positions with live prices and unrealized PnL, total value, win rate, fees.",
+            params = jsonSchema { },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.FAST
+                example(intent = "Check current paper portfolio value and open positions.") { _ -> }
+            },
         ) { _ -> paperEngine.getPortfolio().toString() }
 
         // --- paper_history ---
@@ -341,9 +411,15 @@ class TaichiToolService : ToolAppService() {
 
         // --- paper_reset ---
         registry.textTool(
-            "paper_reset",
-            "Reset paper trading portfolio. Wipes all positions and trades, starts fresh.",
-            jsonSchema { number("starting_capital", "Starting capital in USD (default: 10000)", required = false) }
+            name = "paper_reset",
+            description = "Reset paper trading portfolio. Wipes all positions and trades, starts fresh.",
+            params = jsonSchema { number("starting_capital", "Starting capital in USD (default: 10000)", required = false) },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = true
+                latencyClass = LatencyClass.FAST
+                example(intent = "Wipe the paper portfolio to start fresh.") { _ -> }
+            },
         ) { args ->
             val capital = args["starting_capital"]?.jsonPrimitive?.doubleOrNull ?: 10_000.0
             paperEngine.reset(capital).toString()
@@ -991,22 +1067,5 @@ class TaichiToolService : ToolAppService() {
             return score
         }
 
-        /**
-         * Extension to register text-returning tools on a ToolRegistry,
-         * mirroring the McpServerBuilder.textTool DSL.
-         */
-        private fun ToolRegistry.textTool(
-            name: String,
-            description: String,
-            params: JsonObject,
-            handler: suspend (JsonObject) -> String
-        ) {
-            register(McpToolDef(
-                info = ToolInfo(name = name, description = description, inputSchema = params),
-                handler = { args ->
-                    ToolCallResult(content = listOf(ContentBlock.text(handler(args))))
-                }
-            ))
-        }
     }
 }
