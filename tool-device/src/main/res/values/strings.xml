@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Device Tools</string>
+    <string name="service_running">Foreground service active</string>
+    <string name="execute">Execute</string>
+    <string name="result_label">Result</string>
+    <string name="log_title">Tool Call Log</string>
+    <string name="log_empty">No tool calls yet</string>
+    <string name="param_count">%d params</string>
+    <string name="no_params">no params</string>
+    <string name="clear_log">Clear</string>
+</resources>

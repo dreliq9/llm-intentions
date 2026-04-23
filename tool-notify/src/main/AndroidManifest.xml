@@ -9,7 +9,7 @@
     <application
         android:allowBackup="true"
         android:label="LLM Notification Tools"
-        android:theme="@style/Theme.AppCompat.Light">
+        android:theme="@style/Theme.NotifyTools">
 
         <activity
             android:name=".NotifyActivity"

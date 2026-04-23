@@ -10,7 +10,7 @@
     <application
         android:allowBackup="true"
         android:label="LLM Device Tools"
-        android:theme="@style/Theme.AppCompat.Light">
+        android:theme="@style/Theme.DeviceTools">
 
         <activity
             android:name=".DeviceActivity"

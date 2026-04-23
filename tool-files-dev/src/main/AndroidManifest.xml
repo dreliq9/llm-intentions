@@ -17,7 +17,7 @@
         android:allowBackup="true"
         android:label="LLM File Tools (Dev)"
         android:requestLegacyExternalStorage="true"
-        android:theme="@style/Theme.AppCompat.Light">
+        android:theme="@style/Theme.FileToolsDev">
 
         <activity
             android:name=".FilesDevActivity"
