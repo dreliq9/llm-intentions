@@ -18,9 +18,11 @@ import android.os.VibratorManager
 import android.speech.tts.TextToSpeech
 import android.app.ActivityManager
 import android.os.Environment
+import com.androidmcp.core.protocol.LatencyClass
 import com.androidmcp.core.registry.ToolRegistry
 import com.androidmcp.core.registry.jsonSchema
 import com.androidmcp.core.registry.textTool
+import com.androidmcp.core.registry.toolMetadata
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.*
@@ -109,8 +111,22 @@ object DeviceToolRegistrar {
             } else "(clipboard empty)"
         }
 
-        registry.textTool("clipboard_write", "Write text to the clipboard",
-            jsonSchema { string("text", "Text to copy to clipboard") }
+        registry.textTool(
+            name = "clipboard_write",
+            description = "Write text to the clipboard",
+            params = jsonSchema { string("text", "Text to copy to clipboard") },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = false
+                latencyClass = LatencyClass.FAST
+                failureMode(
+                    pattern = "secure keyboard|not allowed",
+                    hint = "Some secure keyboards block clipboard writes. Ask the user to switch keyboard temporarily.",
+                )
+                example(intent = "Copy a URL to clipboard.") { args ->
+                    args["text"] = "https://example.com"
+                }
+            },
         ) { args ->
             val text = args["text"]?.jsonPrimitive?.content ?: ""
             val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -118,26 +134,69 @@ object DeviceToolRegistrar {
             "Copied to clipboard: ${text.take(50)}${if (text.length > 50) "..." else ""}"
         }
 
-        registry.textTool("flashlight_on", "Turn on the camera flashlight",
-            jsonSchema { }
+        registry.textTool(
+            name = "flashlight_on",
+            description = "Turn on the camera flashlight",
+            params = jsonSchema { },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = false
+                latencyClass = LatencyClass.FAST
+                permission("CAMERA")
+                failureMode(
+                    pattern = "no camera|Camera (error|unavailable)|no flash",
+                    hint = "No camera or flash available on this device (emulator?). Use device.all to check hardware.",
+                )
+                example(intent = "Turn on the flashlight.") { args -> }
+            },
         ) {
             val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            val cameraId = cm.cameraIdList.firstOrNull() ?: return@textTool "No camera found"
+            val cameraId = cm.cameraIdList.firstOrNull()
+                ?: throw IllegalArgumentException("No camera found on this device.")
             cm.setTorchMode(cameraId, true)
             "Flashlight ON"
         }
 
-        registry.textTool("flashlight_off", "Turn off the camera flashlight",
-            jsonSchema { }
+        registry.textTool(
+            name = "flashlight_off",
+            description = "Turn off the camera flashlight",
+            params = jsonSchema { },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = false
+                latencyClass = LatencyClass.FAST
+                permission("CAMERA")
+                failureMode(
+                    pattern = "no camera|Camera (error|unavailable)|no flash",
+                    hint = "No camera or flash available on this device (emulator?). Use device.all to check hardware.",
+                )
+                example(intent = "Turn off the flashlight.") { args -> }
+            },
         ) {
             val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            val cameraId = cm.cameraIdList.firstOrNull() ?: return@textTool "No camera found"
+            val cameraId = cm.cameraIdList.firstOrNull()
+                ?: throw IllegalArgumentException("No camera found on this device.")
             cm.setTorchMode(cameraId, false)
             "Flashlight OFF"
         }
 
-        registry.textTool("vibrate", "Vibrate the device",
-            jsonSchema { integer("duration_ms", "Duration in milliseconds (default 500)", required = false) }
+        registry.textTool(
+            name = "vibrate",
+            description = "Vibrate the device",
+            params = jsonSchema { integer("duration_ms", "Duration in milliseconds (default 500)", required = false) },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = false
+                latencyClass = LatencyClass.FAST
+                permission("VIBRATE")
+                failureMode(
+                    pattern = "permission|SecurityException",
+                    hint = "Grant VIBRATE permission to LLM Device Tools in System Settings > Apps > LLM Device Tools > Permissions.",
+                )
+                example(intent = "Vibrate for half a second.") { args ->
+                    args["duration_ms"] = 500
+                }
+            },
         ) { args ->
             val ms = args["duration_ms"]?.jsonPrimitive?.longOrNull ?: 500L
             val vibrator = if (Build.VERSION.SDK_INT >= 31) {
@@ -210,21 +269,49 @@ object DeviceToolRegistrar {
             }
         }
 
-        registry.textTool("tts_speak", "Speak text aloud using text-to-speech",
-            jsonSchema { string("text", "Text to speak") }
+        registry.textTool(
+            name = "tts_speak",
+            description = "Speak text aloud using text-to-speech",
+            params = jsonSchema { string("text", "Text to speak") },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = false
+                latencyClass = LatencyClass.SLOW
+                failureMode(
+                    pattern = "no tts engine|TTS init",
+                    hint = "No TTS engine installed. Install one from Play Store.",
+                )
+                example(intent = "Say hello out loud.") { args ->
+                    args["text"] = "Hello!"
+                }
+            },
         ) { args ->
             val text = args["text"]?.jsonPrimitive?.content ?: ""
-            if (!ttsReady) return@textTool "TTS not ready"
+            if (!ttsReady) throw IllegalStateException("TTS init failed: no TTS engine ready.")
             tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "mcp-tts")
             "Speaking: ${text.take(80)}"
         }
 
-        registry.textTool("sensor_read", "Read device sensors (accelerometer, gyroscope, compass, light, pressure, proximity)",
-            jsonSchema {
+        registry.textTool(
+            name = "sensor_read",
+            description = "Read device sensors (accelerometer, gyroscope, compass, light, pressure, proximity)",
+            params = jsonSchema {
                 enum("sensor", "Which sensor to read",
                     listOf("accelerometer", "gyroscope", "compass", "light", "pressure", "proximity", "all"),
                     required = false)
-            }
+            },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.FAST
+                failureMode(
+                    pattern = "unknown sensor|Unknown sensor|no such sensor",
+                    hint = "Call device.all to enumerate available sensors on this device.",
+                )
+                example(intent = "Read the accelerometer.") { args ->
+                    args["sensor"] = "accelerometer"
+                }
+            },
         ) { args ->
             val sensorName = args["sensor"]?.jsonPrimitive?.contentOrNull ?: "all"
             val sm = ctx.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -246,7 +333,7 @@ object DeviceToolRegistrar {
                     "light" -> Sensor.TYPE_LIGHT
                     "pressure" -> Sensor.TYPE_PRESSURE
                     "proximity" -> Sensor.TYPE_PROXIMITY
-                    else -> return@textTool "Unknown sensor: $sensorName"
+                    else -> throw IllegalArgumentException("Unknown sensor: $sensorName")
                 }
                 mapOf(sensorName to type)
             }
