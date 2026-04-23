@@ -5,9 +5,11 @@ import android.content.ContentValues
 import android.content.Context
 import android.provider.CalendarContract
 import android.provider.ContactsContract
+import com.androidmcp.core.protocol.LatencyClass
 import com.androidmcp.core.registry.ToolRegistry
 import com.androidmcp.core.registry.jsonSchema
 import com.androidmcp.core.registry.textTool
+import com.androidmcp.core.registry.toolMetadata
 import kotlinx.serialization.json.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -17,7 +19,20 @@ object PeopleToolRegistrar {
     fun register(registry: ToolRegistry, ctx: Context) {
 
         registry.textTool("contacts_search", "Search contacts by name or phone number",
-            jsonSchema { string("query", "Name or number to search") }
+            jsonSchema { string("query", "Name or number to search") },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.SLOW
+                permission("READ_CONTACTS")
+                failureMode(
+                    pattern = "permission|SecurityException",
+                    hint = "Grant READ_CONTACTS permission to LLM People Tools in System Settings > Apps > Permissions.",
+                )
+                example(intent = "Find a contact named Alice.") { args ->
+                    args["query"] = "Alice"
+                }
+            },
         ) { args ->
             val query = args["query"]?.jsonPrimitive?.content ?: ""
             val cursor = ctx.contentResolver.query(ContactsContract.Contacts.CONTENT_URI,
@@ -58,7 +73,25 @@ object PeopleToolRegistrar {
         }
 
         registry.textTool("contact_add", "Add a new contact",
-            jsonSchema { string("name", "Contact display name"); string("phone", "Phone number", required = false); string("email", "Email address", required = false) }
+            jsonSchema { string("name", "Contact display name"); string("phone", "Phone number", required = false); string("email", "Email address", required = false) },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = false
+                latencyClass = LatencyClass.FAST
+                permission("WRITE_CONTACTS")
+                failureMode(
+                    pattern = "permission|SecurityException",
+                    hint = "Grant WRITE_CONTACTS permission.",
+                )
+                failureMode(
+                    pattern = "missing (name|phone)|required",
+                    hint = "Provide at least a name or a phone number.",
+                )
+                example(intent = "Add a contact named Bob with phone 555-1234.") { args ->
+                    args["name"] = "Bob"
+                    args["phone"] = "555-1234"
+                }
+            },
         ) { args ->
             val name = args["name"]?.jsonPrimitive?.content ?: ""; val phone = args["phone"]?.jsonPrimitive?.contentOrNull; val email = args["email"]?.jsonPrimitive?.contentOrNull
             val ops = ArrayList<android.content.ContentProviderOperation>()
@@ -83,7 +116,24 @@ object PeopleToolRegistrar {
         }
 
         registry.textTool("contact_delete", "Delete a contact by ID",
-            jsonSchema { string("contact_id", "Contact ID to delete") }
+            jsonSchema { string("contact_id", "Contact ID to delete") },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = false
+                latencyClass = LatencyClass.FAST
+                permission("WRITE_CONTACTS")
+                failureMode(
+                    pattern = "permission|SecurityException",
+                    hint = "Grant WRITE_CONTACTS permission.",
+                )
+                failureMode(
+                    pattern = "not found|no such contact",
+                    hint = "Verify the contact_id via contacts_search first.",
+                )
+                example(intent = "Delete contact with ID 42.") { args ->
+                    args["contact_id"] = "42"
+                }
+            },
         ) { args ->
             val id = args["contact_id"]?.jsonPrimitive?.content ?: ""
             val deleted = ctx.contentResolver.delete(ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, id.toLong()), null, null)
@@ -111,7 +161,20 @@ object PeopleToolRegistrar {
             JsonArray(events).toString()
         }
 
-        registry.textTool("calendar_today", "List today's calendar events", jsonSchema { }) {
+        registry.textTool("calendar_today", "List today's calendar events",
+            jsonSchema { },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.FAST
+                permission("READ_CALENDAR")
+                failureMode(
+                    pattern = "permission|SecurityException",
+                    hint = "Grant READ_CALENDAR permission to LLM People Tools.",
+                )
+                example(intent = "What's on my calendar today?") { _ -> }
+            },
+        ) {
             val dtf = SimpleDateFormat("HH:mm", Locale.US)
             val startMs = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0) }.timeInMillis
             val endMs = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 59) }.timeInMillis
@@ -125,14 +188,33 @@ object PeopleToolRegistrar {
         }
 
         registry.textTool("event_create", "Create a calendar event",
-            jsonSchema { string("title", "Event title"); string("start", "Start time (YYYY-MM-DD HH:mm)"); string("end", "End time", required = false); string("location", "Location", required = false); string("description", "Description", required = false) }
+            jsonSchema { string("title", "Event title"); string("start", "Start time (YYYY-MM-DD HH:mm)"); string("end", "End time", required = false); string("location", "Location", required = false); string("description", "Description", required = false) },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = false
+                latencyClass = LatencyClass.FAST
+                permission("WRITE_CALENDAR")
+                failureMode(
+                    pattern = "permission|SecurityException",
+                    hint = "Grant WRITE_CALENDAR permission.",
+                )
+                failureMode(
+                    pattern = "invalid (start|end)|bad date",
+                    hint = "Timestamps must be Unix epoch seconds (or match the format the handler parses — check the schema description).",
+                )
+                example(intent = "Create a meeting called Standup tomorrow at 9am.") { args ->
+                    args["title"] = "Standup"
+                    args["start"] = "2026-04-23 09:00"
+                }
+            },
         ) { args ->
             val df = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
             val title = args["title"]?.jsonPrimitive?.content ?: ""
             val startMs = try { df.parse(args["start"]?.jsonPrimitive?.content ?: "")?.time } catch (_: Exception) { null } ?: System.currentTimeMillis()
             val endMs = try { args["end"]?.jsonPrimitive?.contentOrNull?.let { df.parse(it)?.time } } catch (_: Exception) { null } ?: (startMs + 3600000)
             val calCursor = ctx.contentResolver.query(CalendarContract.Calendars.CONTENT_URI, arrayOf(CalendarContract.Calendars._ID), null, null, null)
-            val calId = calCursor?.use { if (it.moveToFirst()) it.getLong(0) else null } ?: return@textTool "No calendar found"
+            val calId = calCursor?.use { if (it.moveToFirst()) it.getLong(0) else null }
+                ?: throw IllegalStateException("No calendar found — ensure a calendar account is configured on the device.")
             val values = ContentValues().apply {
                 put(CalendarContract.Events.CALENDAR_ID, calId); put(CalendarContract.Events.TITLE, title)
                 put(CalendarContract.Events.DTSTART, startMs); put(CalendarContract.Events.DTEND, endMs)
