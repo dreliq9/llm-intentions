@@ -16,7 +16,7 @@ class PeopleToolService : ToolAppService() {
                 ToolCallLog.add("LLM", name, result.content.joinToString("\n") { it.text ?: "" }, result.isError)
                 result
             }
-            registry.register(McpToolDef(info = tool.info, handler = loggingHandler))
+            registry.register(McpToolDef(info = tool.info, metadata = tool.metadata, handler = loggingHandler))
         }
     }
 }

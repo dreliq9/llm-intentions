@@ -20,7 +20,7 @@ class DeviceToolService : ToolAppService() {
                 ToolCallLog.add("LLM", name, text, result.isError)
                 result
             }
-            registry.register(McpToolDef(info = tool.info, handler = loggingHandler))
+            registry.register(McpToolDef(info = tool.info, metadata = tool.metadata, handler = loggingHandler))
         }
     }
 
