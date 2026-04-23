@@ -5,9 +5,11 @@ import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
+import com.androidmcp.core.protocol.LatencyClass
 import com.androidmcp.core.registry.ToolRegistry
 import com.androidmcp.core.registry.jsonSchema
 import com.androidmcp.core.registry.textTool
+import com.androidmcp.core.registry.toolMetadata
 import kotlinx.serialization.json.*
 import java.io.File
 import java.text.SimpleDateFormat
@@ -56,11 +58,30 @@ object FilesDevToolRegistrar {
         }
 
         // --- fs_read ---
-        registry.textTool("fs_read", "Read a text file from any path on the device",
-            jsonSchema {
+        registry.textTool(
+            name = "fs_read",
+            description = "Read a text file from any path on the device",
+            params = jsonSchema {
                 string("path", "Absolute file path")
                 integer("max_bytes", "Max bytes to read (default 1MB)", required = false)
-            }
+            },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.FAST
+                permission("MANAGE_EXTERNAL_STORAGE")
+                failureMode(
+                    exceptionType = "FileNotFoundException",
+                    hint = "Check the path exists; use an absolute path.",
+                )
+                failureMode(
+                    pattern = "Permission denied",
+                    hint = "Grant 'All files access' to LLM File Tools (Dev) in Settings > Apps > Permissions.",
+                )
+                example(intent = "Read a text note from the device Downloads folder.") { args ->
+                    args["path"] = "/sdcard/Download/note.txt"
+                }
+            },
         ) { args ->
             val path = args["path"]?.jsonPrimitive?.content ?: ""
             val maxBytes = args["max_bytes"]?.jsonPrimitive?.longOrNull ?: 1_000_000L
@@ -90,12 +111,36 @@ object FilesDevToolRegistrar {
         }
 
         // --- fs_write ---
-        registry.textTool("fs_write", "Write text to any path on the device",
-            jsonSchema {
+        registry.textTool(
+            name = "fs_write",
+            description = "Write text to any path on the device",
+            params = jsonSchema {
                 string("path", "Absolute file path")
                 string("content", "Text content to write")
                 boolean("append", "Append instead of overwrite (default false)", required = false)
-            }
+            },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = true
+                latencyClass = LatencyClass.FAST
+                permission("MANAGE_EXTERNAL_STORAGE")
+                failureMode(
+                    pattern = "Permission denied|operation not permitted",
+                    hint = "Grant 'All files access' to LLM File Tools (Dev) in System Settings > Apps > LLM File Tools (Dev) > Permissions.",
+                )
+                failureMode(
+                    pattern = "No space left|ENOSPC",
+                    hint = "Device storage is full — free space and retry.",
+                )
+                failureMode(
+                    exceptionType = "FileNotFoundException",
+                    hint = "Parent directory doesn't exist. Use an absolute path whose parent already exists (e.g., /sdcard/Download/...).",
+                )
+                example(intent = "Write a text note to the device Downloads folder.") { args ->
+                    args["path"] = "/sdcard/Download/note.txt"
+                    args["content"] = "hello"
+                }
+            },
         ) { args ->
             val path = args["path"]?.jsonPrimitive?.content ?: ""
             val content = args["content"]?.jsonPrimitive?.content ?: ""
@@ -107,8 +152,24 @@ object FilesDevToolRegistrar {
         }
 
         // --- fs_delete ---
-        registry.textTool("fs_delete", "Delete a file or empty directory",
-            jsonSchema { string("path", "Absolute path to delete") }
+        registry.textTool(
+            name = "fs_delete",
+            description = "Delete a file or empty directory",
+            params = jsonSchema { string("path", "Absolute path to delete") },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = true
+                latencyClass = LatencyClass.FAST
+                permission("MANAGE_EXTERNAL_STORAGE")
+                failureMode(
+                    pattern = "Permission denied",
+                    hint = "Grant 'All files access' to LLM File Tools (Dev) in System Settings > Apps > LLM File Tools (Dev) > Permissions.",
+                )
+                failureMode(
+                    exceptionType = "FileNotFoundException",
+                    hint = "File is already gone — no-op.",
+                )
+            },
         ) { args ->
             val path = args["path"]?.jsonPrimitive?.content ?: ""
             val file = File(path)
@@ -236,11 +297,25 @@ object FilesDevToolRegistrar {
         }
 
         // --- fs_tree ---
-        registry.textTool("fs_tree", "Show directory tree (like the tree command)",
-            jsonSchema {
+        registry.textTool(
+            name = "fs_tree",
+            description = "Show directory tree (like the tree command)",
+            params = jsonSchema {
                 string("path", "Root directory")
                 integer("depth", "Max depth (default 3)", required = false)
-            }
+            },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.SLOW
+                failureMode(
+                    pattern = "Permission denied",
+                    hint = "Enable 'All files access' for LLM File Tools (Dev) in System Settings > Apps > LLM File Tools (Dev) > Permissions.",
+                )
+                example(intent = "Show the directory tree of the Downloads folder.") { args ->
+                    args["path"] = "/sdcard/Download"
+                }
+            },
         ) { args ->
             val root = File(args["path"]?.jsonPrimitive?.content ?: "/sdcard")
             val maxDepth = args["depth"]?.jsonPrimitive?.intOrNull ?: 3
@@ -268,14 +343,29 @@ object FilesDevToolRegistrar {
         }
 
         // --- fs_grep ---
-        registry.textTool("fs_grep", "Search file contents for a text pattern",
-            jsonSchema {
+        registry.textTool(
+            name = "fs_grep",
+            description = "Search file contents for a text pattern",
+            params = jsonSchema {
                 string("path", "Directory to search in")
                 string("pattern", "Text to search for (case-insensitive)")
                 string("glob", "Filename filter, e.g. *.txt, *.json (default: all files)", required = false)
                 integer("max_results", "Max matching files (default 20)", required = false)
                 integer("context_lines", "Lines of context around each match (default 1)", required = false)
-            }
+            },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.SLOW
+                failureMode(
+                    pattern = "Permission denied",
+                    hint = "Enable 'All files access' for LLM File Tools (Dev) in System Settings > Apps > LLM File Tools (Dev) > Permissions.",
+                )
+                example(intent = "Search for the word 'hello' in files under Downloads.") { args ->
+                    args["path"] = "/sdcard/Download"
+                    args["pattern"] = "hello"
+                }
+            },
         ) { args ->
             val root = File(args["path"]?.jsonPrimitive?.content ?: "/sdcard")
             val pattern = args["pattern"]?.jsonPrimitive?.content ?: ""
@@ -364,11 +454,35 @@ object FilesDevToolRegistrar {
         }
 
         // --- download_file ---
-        registry.textTool("download_file", "Download a file from a URL to Downloads folder",
-            jsonSchema {
+        registry.textTool(
+            name = "download_file",
+            description = "Download a file from a URL to Downloads folder",
+            params = jsonSchema {
                 string("url", "URL to download")
                 string("filename", "Save as filename", required = false)
-            }
+            },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = false
+                latencyClass = LatencyClass.VERY_SLOW
+                permission("INTERNET")
+                permission("MANAGE_EXTERNAL_STORAGE")
+                failureMode(
+                    exceptionType = "UnknownHostException",
+                    hint = "Check device internet connection.",
+                )
+                failureMode(
+                    exceptionType = "SocketTimeoutException",
+                    hint = "Server too slow; retry or use a different URL.",
+                )
+                failureMode(
+                    pattern = "HTTP 4",
+                    hint = "Server rejected the request — check URL.",
+                )
+                example(intent = "Download a file from a public URL to the device.") { args ->
+                    args["url"] = "https://example.com/file.txt"
+                }
+            },
         ) { args ->
             val url = args["url"]?.jsonPrimitive?.content ?: return@textTool "URL required"
             val filename = args["filename"]?.jsonPrimitive?.contentOrNull
