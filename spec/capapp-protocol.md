@@ -1,208 +1,158 @@
 # CapApp Protocol Specification
 
-**Version:** 0.1.0
-**Date:** 2026-04-02
-**Status:** Working Draft — implemented and running in production
+**Version:** 0.2.0
+**Date:** 2026-04-23
+**Status:** Matches the implementation in `mcp-intent-api/` and `tool-*` modules as of 2026-04-23.
 
 ## Abstract
 
-This document specifies how an Android application becomes a **CapApp** (Capability App) — an app that exposes MCP-compatible tools to LLMs via the LLM Intentions Hub, using Android Intents as the transport layer.
+This document specifies how an Android application becomes a **CapApp** — a Capability App that exposes MCP tools to LLMs via the LLM Intentions Hub, using Android Intents as the transport.
 
 ## 1. Overview
 
 A CapApp is an Android APK that:
 
-1. Declares its tool capabilities via the AndroidMCP protocol
-2. Receives tool invocations as Android Intents
-3. Returns results as Intent response data
-4. Is discovered automatically by the Hub
+1. Extends `ToolAppService` from `com.androidmcp.intent`.
+2. Registers tools programmatically via a `*ToolRegistrar` using the `textTool` / `envelopeTool` DSL from `com.androidmcp.core.registry`.
+3. Is discovered automatically by the Hub via an Intent filter + metadata marker.
 
-The CapApp has no user-facing UI. It runs as a service, responding to structured Intent calls from the Hub.
+Tools are registered in code, not in XML. The Hub enumerates CapApps via `PackageManager.queryIntentServices` for `com.androidmcp.tool.LIST_TOOLS` + the `com.androidmcp.TOOL_APP` meta-data marker.
 
-## 2. Registration
+## 2. AndroidManifest requirements
 
-### 2.1 Manifest Declaration
-
-A CapApp declares itself as an MCP tool provider in its `AndroidManifest.xml`. The service MUST be protected by a signature-level permission so that only the Hub (signed with the same key) can invoke it:
+A CapApp's `AndroidManifest.xml` must declare its `ToolAppService` subclass as an exported service with the MCP intent filter and two meta-data entries:
 
 ```xml
-<permission
-    android:name="com.llmintentions.permission.MCP_TOOL"
-    android:protectionLevel="signature" />
-
 <service
-    android:name=".CommandGatewayService"
-    android:exported="true"
-    android:permission="com.llmintentions.permission.MCP_TOOL">
+    android:name=".MyToolService"
+    android:exported="true">
     <intent-filter>
-        <action android:name="com.llmintentions.ACTION_MCP_TOOL" />
+        <action android:name="com.androidmcp.tool.EXECUTE" />
+        <action android:name="com.androidmcp.tool.LIST_TOOLS" />
         <category android:name="android.intent.category.DEFAULT" />
     </intent-filter>
-    <meta-data
-        android:name="com.llmintentions.mcp.tools"
-        android:resource="@xml/mcp_tools" />
+    <meta-data android:name="com.androidmcp.TOOL_APP" android:value="true" />
+    <meta-data android:name="com.androidmcp.NAMESPACE" android:value="myapp" />
 </service>
 ```
 
-### 2.2 Tool Declaration
+The `NAMESPACE` meta-data is the prefix applied to every tool in the Hub's aggregated registry (`myapp.tool_name`).
 
-Tools are declared in an XML resource (`res/xml/mcp_tools.xml`) or returned dynamically via a discovery Intent:
+## 3. Service implementation
 
-```xml
-<mcp-tools namespace="files" version="1.0">
-    <tool name="file_read"
-          description="Read a file from device storage">
-        <param name="path" type="string" required="true"
-               description="Absolute file path" />
-        <param name="encoding" type="string" required="false"
-               description="File encoding (default: utf-8)" />
-    </tool>
-    <tool name="file_write"
-          description="Write content to a file">
-        <param name="path" type="string" required="true" />
-        <param name="content" type="string" required="true" />
-    </tool>
-</mcp-tools>
-```
+Extend `ToolAppService` and override `onCreateTools(registry: ToolRegistry)`:
 
-## 3. Discovery
-
-### 3.1 Hub Discovery Process
-
-When Hub starts or `hub.refresh` is called:
-
-1. Hub queries `PackageManager` for all services with the `com.llmintentions.ACTION_MCP_TOOL` intent filter
-2. For each matching service, Hub reads the `com.llmintentions.mcp.tools` metadata
-3. Hub registers all declared tools in its aggregated registry, prefixed with the CapApp's namespace
-4. Hub reports the discovered CapApps and tool counts via `hub.status`
-
-### 3.2 Dynamic Discovery
-
-CapApps can also support dynamic tool listing by responding to a discovery Intent:
-
-```
-Action: com.llmintentions.ACTION_LIST_TOOLS
-Response: JSON array of tool definitions
-```
-
-This allows CapApps to register tools at runtime based on device state, installed plugins, or user configuration.
-
-## 4. Tool Invocation
-
-### 4.1 Request Flow
-
-When an MCP client calls a namespaced tool (e.g., `files.file_read`):
-
-1. Hub strips the namespace prefix to get the tool name (`file_read`)
-2. Hub identifies the target CapApp from the namespace mapping (`files` → `com.llmintentions.files`)
-3. Hub constructs an Intent:
-
-```
-Action: com.llmintentions.ACTION_MCP_TOOL
-Package: com.llmintentions.files
-Extras:
-  "tool_name": "file_read"
-  "params": {"path": "/sdcard/notes.txt"}
-  "request_id": "uuid"
-```
-
-4. Hub sends the Intent to the CapApp's `CommandGatewayService`
-5. The service processes the request and returns the result
-
-### 4.2 Response Format
-
-The CapApp responds with:
-
-```json
-{
-  "request_id": "uuid",
-  "success": true,
-  "content": [
-    {
-      "type": "text",
-      "text": "File contents here..."
+```kotlin
+class MyToolService : ToolAppService() {
+    override fun onCreateTools(registry: ToolRegistry) {
+        MyToolRegistrar.register(registry, context = this)
     }
-  ]
 }
 ```
 
-Error responses:
+Tool registration lives in a separate `MyToolRegistrar` (convention — it keeps the service class thin and allows the same tools to be exercised in an in-app UI).
 
-```json
+## 4. Tool registration DSL
+
+Use `textTool` for tools that return a text result; use `envelopeTool` for tools that want to emit `WARN` / `FAIL` envelopes directly.
+
+```kotlin
+registry.textTool(
+    name = "<tool-name>",
+    description = "<agent-facing description>",
+    params = jsonSchema {
+        string("arg1", "description", required = true)
+        enum("mode", "description", values = listOf("fast", "slow"), required = true)
+        number("count", "description", required = false)
+        boolean("dry_run", "description", required = false)
+    },
+    metadata = toolMetadata {
+        destructive = false
+        idempotent = true
+        latencyClass = LatencyClass.FAST
+        permission("ANDROID_PERMISSION_NAME")
+        failureMode(pattern = "regex against exception message", hint = "what to do")
+        failureMode(exceptionType = "FileNotFoundException", hint = "...")
+        example(intent = "one-line user intent") { args ->
+            args["arg1"] = "value"
+            args["mode"] = "fast"
+        }
+    },
+) { args ->
+    // Return a String. Throw on hard errors — do NOT catch and return error strings.
+    doWork(args)
+}
+```
+
+## 5. Tool invocation flow
+
+1. MCP client calls `tools/call { name: "myapp.tool_name", arguments: {...} }` on the Hub.
+2. Hub strips the namespace prefix, locates the CapApp, and sends a `com.androidmcp.tool.EXECUTE` Intent to the CapApp's `ToolAppService` with extras `tool_name`, `arguments` (JSON string), `callback_id`, `reply_to`.
+3. `ToolAppService.handleExecute` dispatches to the registered handler.
+4. If the handler returns a String (via `textTool`), it's wrapped in `Envelope.ok(summary = "<name> succeeded", data = {"output": <string>}).renderText()`.
+5. If the handler returns an `Envelope` (via `envelopeTool`), that envelope is rendered directly.
+6. If the handler throws, `ToolAppService` catches and produces `Envelope.fromException(toolName, metadata, exception)`, which consults `metadata.failureModes` for an actionable hint.
+7. The result is sent back to the Hub via broadcast Intent `com.androidmcp.tool.RESULT` with the rendered envelope text inside a `ToolCallResult { content: [ContentBlock.text(<envelope>)], isError: <bool> }`.
+
+## 6. Response envelope
+
+Every response a CapApp sends to the Hub — success, tool-not-found, or caught exception — is a single text block in the canonical envelope format:
+
+```
+OK: <tool-name> succeeded
+
 {
-  "request_id": "uuid",
-  "success": false,
-  "error": "File not found: /sdcard/notes.txt"
+  "output": "<handler's string return value>"
 }
 ```
 
-### 4.3 Content Types
+or
 
-CapApps can return multiple content types in a single response:
+```
+FAIL: <tool-name> failed: <exception message>
+Hint: <actionable hint from metadata.failureModes, or empty>
 
-- `text` — plain text or JSON
-- `image` — base64-encoded image data
-- `resource` — URI reference to a file or content provider
+Raw:
+{
+  "exception": "<simple class name>",
+  "message": "<exception message>"
+}
+```
 
-## 5. Namespacing
+`WARN:` envelopes are produced only by tools using `envelopeTool` that explicitly emit `Envelope.warn(...)`.
 
-Each CapApp declares a namespace (or multiple namespaces) in its tool definition. The Hub uses this to:
+## 7. Lifecycle
 
-- Prefix tool names in the aggregated registry
-- Route incoming calls to the correct CapApp
-- Prevent name collisions between CapApps
+### 7.1 Installation & discovery
 
-A single CapApp can expose multiple namespaces for logical grouping:
+When a new CapApp APK is installed, the Hub does NOT auto-refresh. The user (or an agent) must call `hub.refresh` to trigger re-discovery. On Android 12+, the OS may also require the CapApp's launcher Activity to have been started at least once before the Hub's `PackageManager.queryIntentServices` sees its services (confirmed behavior on Pixel_8 / API 35 emulator).
 
-| CapApp | Namespaces | Purpose |
-|---------|-----------|---------|
-| Files | `files.*`, `fs.*` | User-level ops vs low-level filesystem |
-| People | `people.*` | Contacts + calendar unified |
+### 7.2 Updates
 
-## 6. Lifecycle
+Reinstalling a CapApp APK takes effect immediately for future tool invocations. Call `hub.refresh` if the tool list or metadata changed. Note: Android background-start restrictions may prevent the Hub from `startService`-ing into a freshly-installed CapApp until that CapApp's process has been launched at least once (again, a launcher Activity tap or `am start` suffices).
 
-### 6.1 Installation
+### 7.3 Removal
 
-When a new CapApp APK is installed:
-1. User installs the APK (sideload or app store)
-2. User calls `hub.refresh` (or Hub auto-discovers on next start)
-3. Hub finds the new CapApp and registers its tools
-4. Tools are immediately available to MCP clients
+When a CapApp is uninstalled, the Hub's cached registry still references its tools until `hub.refresh` is called — tool invocations will time out or produce `FAIL` envelopes with transport errors.
 
-### 6.2 Updates
+## 8. Permissions
 
-When a CapApp APK is updated:
-1. New version is installed over the old one
-2. Hub re-discovers on next `hub.refresh`
-3. Tool registry is updated with any new/changed/removed tools
+CapApps request their own Android permissions independently via their `AndroidManifest.xml`. The Hub does not proxy or escalate permissions.
 
-### 6.3 Removal
+Tool `metadata.permissions` is documentation-only — a list of permission strings the CapApp needs for this tool to succeed. Agents read this via `hub.status` or by inspecting rendered failure hints.
 
-When a CapApp is uninstalled:
-1. Hub detects the missing package on next `hub.refresh`
-2. All tools from that namespace are removed from the registry
-3. MCP clients see the tools disappear from `tools/list`
+## 9. Author convention: throw, don't catch
 
-## 7. Permissions
+**Rule:** A CapApp handler should let exceptions propagate for hard failures. Catching and returning an error string like `"Error: file not found"` causes the framework to wrap the string as `OK: <tool> succeeded`, which:
 
-CapApps request their own Android permissions independently:
+- Hides the failure from `isError` in `ToolCallResult`.
+- Skips the `metadata.failureModes` matching that would otherwise inject an actionable hint.
+- Masks retriable error categories (transient network, permission-denied, rate-limit) as successes.
 
-- **Files CapApp**: `READ_EXTERNAL_STORAGE`, `WRITE_EXTERNAL_STORAGE`, `MANAGE_EXTERNAL_STORAGE`
-- **Notify CapApp**: `BIND_NOTIFICATION_LISTENER_SERVICE`
-- **People CapApp**: `READ_CONTACTS`, `WRITE_CONTACTS`, `READ_CALENDAR`, `WRITE_CALENDAR`
+When you genuinely need `WARN` (partial success) or `FAIL` without an exception to throw (e.g., input validation before any operation ran), use `envelopeTool` and return `Envelope.warn(...)` / `Envelope.fail(...)` directly. Worked example: `llm-intentions/.../HubMetaTools.kt::registerClaude`.
 
-The Hub does not proxy or escalate permissions. Each CapApp must have its own permission grants from the user.
+## 10. In-app tool UI (optional)
 
-## 8. Building a CapApp
+The base pattern (implemented in `tool-device`, `tool-notify`, `tool-people`, `tool-files-dev`) gives each CapApp a `ToolAdapter` / `ToolExecuteSheet` / `ToolCallLog` / `LogDialog` so users can manually inspect and invoke tools from the app itself, alongside LLM-driven invocations. The call log records both LLM-originated and UI-originated calls with result preview + error flag. This is not required by the protocol — it's a CapApp-author convenience.
 
-See [capapps/template/](../capapps/template/) for a minimal starter project.
-
-The key implementation steps:
-
-1. Create an Android app with a `CommandGatewayService`
-2. Declare your tools in the manifest or XML resource
-3. Implement tool handlers in the service
-4. Build and install the APK
-5. Call `hub.refresh` to register with Hub
-
-No SDK dependency is required — CapApps communicate with Hub purely via Android Intents.
+See `capapp-template/` for a minimal starter.
