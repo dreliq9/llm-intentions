@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
-data class PositionUi(
+data class LongPositionUi(
     val symbol: String,
     val quantity: Double,
     val entryPrice: Double,
@@ -20,6 +20,22 @@ data class PositionUi(
     val marketValue: Double,
     val unrealizedPnl: Double,
     val unrealizedPnlPct: Double,
+    val openedAt: String,
+)
+
+data class ShortPositionUi(
+    val symbol: String,
+    val quantity: Double,
+    val entryPrice: Double,
+    val currentPrice: Double,
+    val notional: Double,
+    val unrealizedPnl: Double,
+    val unrealizedPnlPct: Double,
+    val cumulativeFunding: Double,
+    val collateralLocked: Double,
+    val liquidationPrice: Double?,
+    val liqDistancePct: Double?,
+    val leverage: Double,
     val openedAt: String,
 )
 
@@ -36,16 +52,21 @@ data class TradeUi(
 
 data class PortfolioState(
     val cash: Double = 0.0,
-    val positionsValue: Double = 0.0,
+    val longPositionsValue: Double = 0.0,
+    val shortUnrealizedPnl: Double = 0.0,
     val totalValue: Double = 0.0,
     val totalPnl: Double = 0.0,
     val totalPnlPct: Double = 0.0,
     val startingCapital: Double = 10_000.0,
-    val positions: List<PositionUi> = emptyList(),
+    val longPositions: List<LongPositionUi> = emptyList(),
+    val shortPositions: List<ShortPositionUi> = emptyList(),
     val totalTrades: Int = 0,
     val totalFees: Double = 0.0,
     val winRate: Double? = null,
+    val longWinRate: Double? = null,
+    val shortWinRate: Double? = null,
     val closedTrades: Int = 0,
+    val liquidationEvents: List<String> = emptyList(),
     val isLoading: Boolean = true,
     val error: String? = null,
 )
@@ -104,9 +125,10 @@ class TaichiViewModel(application: Application) : AndroidViewModel(application) 
             _portfolio.value = _portfolio.value.copy(isLoading = true, error = null)
             try {
                 val json = paperEngine.getPortfolio()
-                val positions = json["open_positions"]?.jsonArray?.map { elem ->
+
+                val longs = json["long_positions"]?.jsonArray?.map { elem ->
                     val obj = elem.jsonObject
-                    PositionUi(
+                    LongPositionUi(
                         symbol = obj["symbol"]!!.jsonPrimitive.content,
                         quantity = obj["quantity"]!!.jsonPrimitive.double,
                         entryPrice = obj["entry_price"]!!.jsonPrimitive.double,
@@ -118,20 +140,55 @@ class TaichiViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 } ?: emptyList()
 
+                val shorts = json["short_positions"]?.jsonArray?.map { elem ->
+                    val obj = elem.jsonObject
+                    ShortPositionUi(
+                        symbol = obj["symbol"]!!.jsonPrimitive.content,
+                        quantity = obj["quantity"]!!.jsonPrimitive.double,
+                        entryPrice = obj["entry_price"]!!.jsonPrimitive.double,
+                        currentPrice = obj["current_price"]!!.jsonPrimitive.double,
+                        notional = obj["notional"]!!.jsonPrimitive.double,
+                        unrealizedPnl = obj["unrealized_pnl"]!!.jsonPrimitive.double,
+                        unrealizedPnlPct = obj["unrealized_pnl_pct"]!!.jsonPrimitive.double,
+                        cumulativeFunding = obj["cumulative_funding"]!!.jsonPrimitive.double,
+                        collateralLocked = obj["collateral_locked"]!!.jsonPrimitive.double,
+                        liquidationPrice = obj["liquidation_price"]?.jsonPrimitive?.doubleOrNull,
+                        liqDistancePct = obj["liq_distance_pct"]?.let {
+                            if (it is JsonNull) null else it.jsonPrimitive.doubleOrNull
+                        },
+                        leverage = obj["leverage"]!!.jsonPrimitive.double,
+                        openedAt = obj["opened_at"]!!.jsonPrimitive.content,
+                    )
+                } ?: emptyList()
+
+                val liqEvents = json["liquidation_events"]?.jsonArray?.map { elem ->
+                    val obj = elem.jsonObject
+                    "${obj["symbol"]?.jsonPrimitive?.content} liquidated at $${obj["cover_price"]?.jsonPrimitive?.double?.let { "%.2f".format(it) }}"
+                } ?: emptyList()
+
                 _portfolio.value = PortfolioState(
                     cash = json["cash"]!!.jsonPrimitive.double,
-                    positionsValue = json["positions_value"]!!.jsonPrimitive.double,
+                    longPositionsValue = json["long_positions_value"]!!.jsonPrimitive.double,
+                    shortUnrealizedPnl = json["short_unrealized_pnl"]!!.jsonPrimitive.double,
                     totalValue = json["total_value"]!!.jsonPrimitive.double,
                     totalPnl = json["total_pnl"]!!.jsonPrimitive.double,
                     totalPnlPct = json["total_pnl_pct"]!!.jsonPrimitive.double,
                     startingCapital = json["starting_capital"]!!.jsonPrimitive.double,
-                    positions = positions,
+                    longPositions = longs,
+                    shortPositions = shorts,
                     totalTrades = json["total_trades"]!!.jsonPrimitive.int,
                     totalFees = json["total_fees"]!!.jsonPrimitive.double,
                     winRate = json["win_rate"]?.let {
                         if (it is JsonNull) null else it.jsonPrimitive.doubleOrNull
                     },
+                    longWinRate = json["long_win_rate"]?.let {
+                        if (it is JsonNull) null else it.jsonPrimitive.doubleOrNull
+                    },
+                    shortWinRate = json["short_win_rate"]?.let {
+                        if (it is JsonNull) null else it.jsonPrimitive.doubleOrNull
+                    },
                     closedTrades = json["closed_trades"]!!.jsonPrimitive.int,
+                    liquidationEvents = liqEvents,
                     isLoading = false,
                 )
             } catch (e: Exception) {
@@ -178,21 +235,10 @@ class TaichiViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
-    fun updateCryptoPanicToken(value: String) {
-        _settings.value = _settings.value.copy(cryptoPanicToken = value)
-    }
-
-    fun updateRedditClientId(value: String) {
-        _settings.value = _settings.value.copy(redditClientId = value)
-    }
-
-    fun updateRedditClientSecret(value: String) {
-        _settings.value = _settings.value.copy(redditClientSecret = value)
-    }
-
-    fun updateCoinGeckoApiKey(value: String) {
-        _settings.value = _settings.value.copy(coinGeckoApiKey = value)
-    }
+    fun updateCryptoPanicToken(value: String) { _settings.value = _settings.value.copy(cryptoPanicToken = value) }
+    fun updateRedditClientId(value: String) { _settings.value = _settings.value.copy(redditClientId = value) }
+    fun updateRedditClientSecret(value: String) { _settings.value = _settings.value.copy(redditClientSecret = value) }
+    fun updateCoinGeckoApiKey(value: String) { _settings.value = _settings.value.copy(coinGeckoApiKey = value) }
 
     fun saveKeys() {
         val s = _settings.value
@@ -200,23 +246,12 @@ class TaichiViewModel(application: Application) : AndroidViewModel(application) 
         keyStore.redditClientId = s.redditClientId.trim()
         keyStore.redditClientSecret = s.redditClientSecret.trim()
         keyStore.coinGeckoApiKey = s.coinGeckoApiKey.trim()
-        _settings.value = _settings.value.copy(
-            keyStatus = keyStore.status(),
-            saveMessage = "Keys saved",
-        )
+        _settings.value = _settings.value.copy(keyStatus = keyStore.status(), saveMessage = "Keys saved")
     }
 
-    fun clearSaveMessage() {
-        _settings.value = _settings.value.copy(saveMessage = null)
-    }
-
-    fun showResetDialog() {
-        _settings.value = _settings.value.copy(showResetDialog = true)
-    }
-
-    fun dismissResetDialog() {
-        _settings.value = _settings.value.copy(showResetDialog = false)
-    }
+    fun clearSaveMessage() { _settings.value = _settings.value.copy(saveMessage = null) }
+    fun showResetDialog() { _settings.value = _settings.value.copy(showResetDialog = true) }
+    fun dismissResetDialog() { _settings.value = _settings.value.copy(showResetDialog = false) }
 
     fun resetPortfolio() {
         paperEngine.reset()
@@ -227,10 +262,7 @@ class TaichiViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun startAutoRefresh() {
         viewModelScope.launch {
-            while (true) {
-                delay(30_000)
-                refreshPortfolio()
-            }
+            while (true) { delay(30_000); refreshPortfolio() }
         }
     }
 }

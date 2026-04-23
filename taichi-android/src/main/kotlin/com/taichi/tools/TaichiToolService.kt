@@ -275,13 +275,14 @@ class TaichiToolService : ToolAppService() {
         // --- paper_trade ---
         registry.textTool(
             "paper_trade",
-            "Execute a paper trade (buy or sell). Uses live DEX/CEX pricing. 0.1% fee per trade.",
+            "Execute a paper trade (buy, sell, short, or cover). Uses live DEX/CEX pricing. 0.1% fee per trade. Shorts simulate margin with collateral, funding rates, and liquidation.",
             jsonSchema {
                 string("symbol", "Token symbol (e.g., ETH, BTC)")
-                string("action", "buy or sell")
-                number("amount_usd", "USD amount to spend (for buys)", required = false)
-                number("quantity", "Token quantity (for sells, or specific buy amount)", required = false)
-                boolean("close_all", "Close entire position (for sells)", required = false)
+                string("action", "buy (open long), sell (close long), short (open short), or cover (close short)")
+                number("amount_usd", "USD amount (for buys and shorts)", required = false)
+                number("quantity", "Token quantity (for sells/covers, or specific amount)", required = false)
+                boolean("close_all", "Close entire position (for sells/covers)", required = false)
+                number("leverage", "Leverage for shorts (default: 1.0)", required = false)
             }
         ) { args ->
             val symbol = args["symbol"]?.jsonPrimitive?.content ?: ""
@@ -289,13 +290,23 @@ class TaichiToolService : ToolAppService() {
             val amountUsd = args["amount_usd"]?.jsonPrimitive?.doubleOrNull
             val quantity = args["quantity"]?.jsonPrimitive?.doubleOrNull
             val closeAll = args["close_all"]?.jsonPrimitive?.booleanOrNull ?: false
+            val leverage = args["leverage"]?.jsonPrimitive?.doubleOrNull ?: 1.0
 
             when (action.lowercase()) {
                 "buy" -> paperEngine.buy(symbol, amountUsd, quantity).toString()
                 "sell" -> paperEngine.sell(symbol, quantity, closeAll).toString()
-                else -> "{\"status\":\"error\",\"message\":\"Action must be 'buy' or 'sell'\"}"
+                "short" -> paperEngine.shortSell(symbol, amountUsd, quantity, leverage).toString()
+                "cover" -> paperEngine.cover(symbol, quantity, closeAll).toString()
+                else -> "{\"status\":\"error\",\"message\":\"Action must be 'buy', 'sell', 'short', or 'cover'\"}"
             }
         }
+
+        // --- paper_exposure ---
+        registry.textTool(
+            "paper_exposure",
+            "Portfolio exposure breakdown: long vs short notional, net delta, locked collateral, margin usage.",
+            jsonSchema { }
+        ) { _ -> paperEngine.getExposureSummary().toString() }
 
         // --- paper_portfolio ---
         registry.textTool(
@@ -773,6 +784,147 @@ class TaichiToolService : ToolAppService() {
                 "{\"error\":\"DefiLlama lookup failed for '$protocol': ${e.message}\"}"
             }
         }
+
+        // ====== PAPER YIELD FARMING ======
+
+        // --- scan_yield_pools ---
+        registry.textTool(
+            "scan_yield_pools",
+            "Scan DefiLlama for the best stablecoin yield pools. Filters by TVL, APY, chain; scores risk by TVL, pool age, IL risk, blue-chip protocol, and APY stability.",
+            jsonSchema {
+                string("stablecoin_filter", "Comma-separated stablecoins (default: USDC,DAI,USDT,FRAX)", required = false)
+                number("min_tvl", "Minimum pool TVL in USD (default: 50000000)", required = false)
+                number("min_apy", "Minimum APY percent (default: 1.0)", required = false)
+                integer("max_results", "Max pools to return (default: 10)", required = false)
+                string("chain", "Filter by chain (e.g., Ethereum, Arbitrum)", required = false)
+            }
+        ) { args ->
+            val stablecoinFilter = args["stablecoin_filter"]?.jsonPrimitive?.contentOrNull
+                ?: "USDC,DAI,USDT,FRAX"
+            val minTvl = args["min_tvl"]?.jsonPrimitive?.doubleOrNull ?: 50_000_000.0
+            val minApy = args["min_apy"]?.jsonPrimitive?.doubleOrNull ?: 1.0
+            val maxResults = args["max_results"]?.jsonPrimitive?.intOrNull ?: 10
+            val chain = args["chain"]?.jsonPrimitive?.contentOrNull
+
+            try {
+                val allPools = bridge.defiLlama.getPools()
+                val stableTokens = stablecoinFilter.split(",").map { it.trim().uppercase() }
+
+                val filtered = allPools.mapNotNull { entry ->
+                    val p = entry.jsonObject
+                    if (p["stablecoin"]?.jsonPrimitive?.booleanOrNull != true) return@mapNotNull null
+                    val tvl = p["tvlUsd"]?.jsonPrimitive?.doubleOrNull ?: return@mapNotNull null
+                    if (tvl < minTvl) return@mapNotNull null
+                    val apy = p["apy"]?.jsonPrimitive?.doubleOrNull ?: return@mapNotNull null
+                    if (apy < minApy) return@mapNotNull null
+                    val symbol = p["symbol"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    val symUpper = symbol.uppercase()
+                    if (stableTokens.none { symUpper.contains(it) }) return@mapNotNull null
+                    if (chain != null) {
+                        val poolChain = p["chain"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                        if (!poolChain.equals(chain, ignoreCase = true)) return@mapNotNull null
+                    }
+
+                    val riskScore = scoreYieldPool(p)
+                    if (riskScore < 70) return@mapNotNull null
+                    Pair(p, riskScore)
+                }
+
+                val sorted = filtered
+                    .sortedByDescending { it.first["apy"]?.jsonPrimitive?.doubleOrNull ?: 0.0 }
+                    .take(maxResults)
+
+                val poolsJson = JsonArray(sorted.map { (p, score) ->
+                    val predictionObj = p["predictions"] as? JsonObject
+                    val trend = predictionObj?.get("predictedClass")?.jsonPrimitive?.contentOrNull
+                    val count = p["count"]?.jsonPrimitive?.intOrNull ?: 0
+                    buildJsonObject {
+                        put("pool_id", p["pool"]?.jsonPrimitive?.contentOrNull ?: "")
+                        put("protocol", p["project"]?.jsonPrimitive?.contentOrNull ?: "")
+                        put("chain", p["chain"]?.jsonPrimitive?.contentOrNull ?: "")
+                        put("symbol", p["symbol"]?.jsonPrimitive?.contentOrNull ?: "")
+                        put("apy", p["apy"]?.jsonPrimitive?.doubleOrNull ?: 0.0)
+                        put("apy_base", p["apyBase"]?.jsonPrimitive?.doubleOrNull ?: 0.0)
+                        put("apy_reward", p["apyReward"]?.jsonPrimitive?.doubleOrNull ?: 0.0)
+                        put("tvl_usd", p["tvlUsd"]?.jsonPrimitive?.doubleOrNull ?: 0.0)
+                        put("il_risk", p["ilRisk"]?.jsonPrimitive?.contentOrNull ?: "unknown")
+                        put("exposure", p["exposure"]?.jsonPrimitive?.contentOrNull ?: "unknown")
+                        put("risk_score", score)
+                        put("apy_mean_30d", p["apyMean30d"]?.jsonPrimitive?.doubleOrNull ?: 0.0)
+                        put("apy_trend", trend ?: "unknown")
+                        put("pool_age_days", count)
+                    }
+                })
+
+                buildJsonObject {
+                    put("pools", poolsJson)
+                    put("count", sorted.size)
+                    put("filters", buildJsonObject {
+                        put("stablecoins", stablecoinFilter)
+                        put("min_tvl", minTvl)
+                        put("min_apy", minApy)
+                        if (chain != null) put("chain", chain)
+                    })
+                }.toString()
+            } catch (e: Exception) {
+                "{\"status\":\"error\",\"message\":\"DefiLlama pools fetch failed: ${e.message}\"}"
+            }
+        }
+
+        // --- paper_farm_deposit ---
+        registry.textTool(
+            "paper_farm_deposit",
+            "Deposit idle paper-trading cash into a simulated DeFi yield pool. Deducts amount + \$3 gas from cash. Minimum \$100.",
+            jsonSchema {
+                string("pool_id", "Pool UUID from scan_yield_pools")
+                string("protocol", "Protocol name (e.g., aave-v3)")
+                string("chain", "Blockchain (e.g., Ethereum)")
+                string("symbol", "Token symbol (e.g., USDC)")
+                number("amount_usd", "Amount to deposit in USD")
+                number("apy", "Current APY percent at time of deposit")
+            }
+        ) { args ->
+            val poolId = args["pool_id"]?.jsonPrimitive?.contentOrNull
+                ?: return@textTool "{\"status\":\"error\",\"message\":\"pool_id required\"}"
+            val protocol = args["protocol"]?.jsonPrimitive?.contentOrNull
+                ?: return@textTool "{\"status\":\"error\",\"message\":\"protocol required\"}"
+            val chain = args["chain"]?.jsonPrimitive?.contentOrNull
+                ?: return@textTool "{\"status\":\"error\",\"message\":\"chain required\"}"
+            val symbol = args["symbol"]?.jsonPrimitive?.contentOrNull
+                ?: return@textTool "{\"status\":\"error\",\"message\":\"symbol required\"}"
+            val amountUsd = args["amount_usd"]?.jsonPrimitive?.doubleOrNull
+                ?: return@textTool "{\"status\":\"error\",\"message\":\"amount_usd required\"}"
+            val apy = args["apy"]?.jsonPrimitive?.doubleOrNull
+                ?: return@textTool "{\"status\":\"error\",\"message\":\"apy required\"}"
+            paperEngine.farmDeposit(poolId, protocol, chain, symbol, amountUsd, apy).toString()
+        }
+
+        // --- paper_farm_withdraw ---
+        registry.textTool(
+            "paper_farm_withdraw",
+            "Withdraw from a farm position. Accrued yield is paid out and \$3 gas is charged. Omit amount_usd to close the full position, or set withdraw_all=true to close every farm.",
+            jsonSchema {
+                string("pool_id", "Pool UUID to withdraw from (required unless withdraw_all)", required = false)
+                number("amount_usd", "Partial withdrawal amount. If omitted, withdraws full position.", required = false)
+                boolean("withdraw_all", "Close every open farm position", required = false)
+            }
+        ) { args ->
+            val poolId = args["pool_id"]?.jsonPrimitive?.contentOrNull
+            val amountUsd = args["amount_usd"]?.jsonPrimitive?.doubleOrNull
+            val withdrawAll = args["withdraw_all"]?.jsonPrimitive?.booleanOrNull ?: false
+            paperEngine.farmWithdraw(poolId, amountUsd, withdrawAll).toString()
+        }
+
+        // --- paper_farm_portfolio ---
+        registry.textTool(
+            "paper_farm_portfolio",
+            "View all active farm positions with accrued yield and a summary. Refreshes APYs from DefiLlama (cached 1h per position).",
+            jsonSchema { }
+        ) { _ ->
+            paperEngine.farmPortfolio { poolId ->
+                try { bridge.defiLlama.getPoolApy(poolId) } catch (_: Exception) { null }
+            }.toString()
+        }
     }
 
     companion object {
@@ -790,6 +942,53 @@ class TaichiToolService : ToolAppService() {
         fun symbolToCoinGeckoId(symbol: String): String {
             val lower = symbol.lowercase()
             return coinGeckoMap[lower] ?: lower
+        }
+
+        private val blueChipProtocols = setOf(
+            "aave-v3", "aave-v2", "compound-v3", "compound-v2", "lido",
+            "maker", "makerdao", "curve-dex", "convex-finance", "morpho",
+            "spark", "sky", "fluid",
+        )
+
+        /**
+         * Risk score (0-100) for a DefiLlama pool object. Higher = safer.
+         * Weighs TVL, pool age (count), IL risk, blue-chip protocol, and APY stability (sigma).
+         */
+        private fun scoreYieldPool(p: JsonObject): Int {
+            var score = 0
+            val tvl = p["tvlUsd"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+            when {
+                tvl > 500_000_000 -> score += 30
+                tvl > 100_000_000 -> score += 20
+                tvl > 50_000_000 -> score += 10
+            }
+
+            val count = p["count"]?.jsonPrimitive?.intOrNull ?: 0
+            when {
+                count > 730 -> score += 25
+                count > 365 -> score += 20
+                count > 180 -> score += 10
+            }
+
+            val ilRisk = p["ilRisk"]?.jsonPrimitive?.contentOrNull
+            val exposure = p["exposure"]?.jsonPrimitive?.contentOrNull
+            when {
+                ilRisk == "no" -> score += 15
+                ilRisk == "yes" && exposure == "single" -> score += 10
+                ilRisk == "yes" && exposure == "multi" -> score += 5
+            }
+
+            val project = p["project"]?.jsonPrimitive?.contentOrNull
+            if (project != null && project in blueChipProtocols) score += 20
+
+            val sigma = p["sigma"]?.jsonPrimitive?.doubleOrNull
+            if (sigma != null) {
+                when {
+                    sigma < 0.1 -> score += 10
+                    sigma < 0.5 -> score += 5
+                }
+            }
+            return score
         }
 
         /**
