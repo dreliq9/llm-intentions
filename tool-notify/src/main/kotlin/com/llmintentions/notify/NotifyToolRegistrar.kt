@@ -4,9 +4,11 @@ import android.app.RemoteInput
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import com.androidmcp.core.protocol.LatencyClass
 import com.androidmcp.core.registry.ToolRegistry
 import com.androidmcp.core.registry.jsonSchema
 import com.androidmcp.core.registry.textTool
+import com.androidmcp.core.registry.toolMetadata
 import kotlinx.serialization.json.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -16,11 +18,22 @@ object NotifyToolRegistrar {
     fun register(registry: ToolRegistry, ctx: Context) {
 
         registry.textTool("notifications_list", "List all currently active notifications on the device",
-            jsonSchema { integer("limit", "Max results (default 50)", required = false) }
+            jsonSchema { integer("limit", "Max results (default 50)", required = false) },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.FAST
+                permission("BIND_NOTIFICATION_LISTENER_SERVICE")
+                failureMode(
+                    pattern = "listener not connected|no listener|not enabled",
+                    hint = "Grant 'Notification Access' to LLM Notify Tools in System Settings > Notifications > Notification Access.",
+                )
+                example(intent = "See what notifications are currently showing on the device.") { _ -> }
+            },
         ) { args ->
             val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 50
             val listener = NotifyListenerService.instance
-                ?: return@textTool "NotificationListener not connected. Enable in Settings > Notifications > Notification access."
+                ?: throw IllegalStateException("listener not connected")
 
             val notifications = listener.activeNotifications
             val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
@@ -74,10 +87,28 @@ object NotifyToolRegistrar {
         }
 
         registry.textTool("notification_dismiss", "Dismiss a notification by key",
-            jsonSchema { string("key", "Notification key to dismiss") }
+            jsonSchema { string("key", "Notification key to dismiss") },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = false
+                latencyClass = LatencyClass.FAST
+                permission("BIND_NOTIFICATION_LISTENER_SERVICE")
+                failureMode(
+                    pattern = "listener not connected|no listener|not enabled",
+                    hint = "Grant 'Notification Access' to LLM Notify Tools in System Settings > Notifications > Notification Access.",
+                )
+                failureMode(
+                    pattern = "unknown key|not found",
+                    hint = "Call notifications_list to get valid keys.",
+                )
+                example(intent = "Dismiss the oldest notification on the screen.") { args ->
+                    args["key"] = "0|com.example.app|0|null|10109"
+                }
+            },
         ) { args ->
             val key = args["key"]?.jsonPrimitive?.content ?: ""
-            val listener = NotifyListenerService.instance ?: return@textTool "NotificationListener not connected"
+            val listener = NotifyListenerService.instance
+                ?: throw IllegalStateException("listener not connected")
             listener.cancelNotification(key)
             "Dismissed: $key"
         }
@@ -94,13 +125,34 @@ object NotifyToolRegistrar {
             jsonSchema {
                 string("key", "Notification key")
                 string("reply", "Reply text")
-            }
+            },
+            metadata = toolMetadata {
+                destructive = true
+                idempotent = false
+                latencyClass = LatencyClass.FAST
+                permission("BIND_NOTIFICATION_LISTENER_SERVICE")
+                failureMode(
+                    pattern = "listener not connected|no listener|not enabled",
+                    hint = "Grant 'Notification Access' to LLM Notify Tools in System Settings > Notifications > Notification Access.",
+                )
+                failureMode(
+                    pattern = "no remote input|reply action missing",
+                    hint = "This notification doesn't have a quick-reply action. Not all notifications support reply.",
+                )
+                example(intent = "Reply 'On my way!' to the most recent message notification.") { args ->
+                    args["key"] = "0|com.example.messages|0|null|10109"
+                    args["reply"] = "On my way!"
+                }
+            },
         ) { args ->
             val key = args["key"]?.jsonPrimitive?.content ?: ""
             val replyText = args["reply"]?.jsonPrimitive?.content ?: ""
-            val listener = NotifyListenerService.instance ?: return@textTool "NotificationListener not connected"
-            val sbn = listener.activeNotifications.find { it.key == key } ?: return@textTool "Notification not found: $key"
-            val actions = sbn.notification.actions ?: return@textTool "No actions on this notification"
+            val listener = NotifyListenerService.instance
+                ?: throw IllegalStateException("listener not connected")
+            val sbn = listener.activeNotifications.find { it.key == key }
+                ?: throw IllegalArgumentException("unknown key: $key")
+            val actions = sbn.notification.actions
+                ?: throw IllegalArgumentException("no remote input — this notification has no actions")
             for (action in actions) {
                 val remoteInputs = action.remoteInputs ?: continue
                 if (remoteInputs.isNotEmpty()) {
@@ -116,7 +168,7 @@ object NotifyToolRegistrar {
                     return@textTool "Reply sent to $key: ${replyText.take(50)}"
                 }
             }
-            "No reply action found on notification $key"
+            throw IllegalArgumentException("no remote input — this notification has no reply action")
         }
 
         registry.textTool("notification_history", "Get recent notification history (last 200, stored in memory)",
@@ -124,7 +176,20 @@ object NotifyToolRegistrar {
                 integer("limit", "Max results (default 50)", required = false)
                 string("package_filter", "Filter by package name", required = false)
                 string("text_filter", "Filter by text content", required = false)
-            }
+            },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.SLOW
+                permission("BIND_NOTIFICATION_LISTENER_SERVICE")
+                failureMode(
+                    pattern = "listener not connected|no listener|not enabled",
+                    hint = "Grant 'Notification Access' to LLM Notify Tools in System Settings > Notifications > Notification Access.",
+                )
+                example(intent = "Show me the last 10 notifications from any app.") { args ->
+                    args["limit"] = 10
+                }
+            },
         ) { args ->
             val limit = args["limit"]?.jsonPrimitive?.intOrNull ?: 50
             val pkgFilter = args["package_filter"]?.jsonPrimitive?.contentOrNull
@@ -142,11 +207,25 @@ object NotifyToolRegistrar {
             jsonSchema {
                 string("package_filter", "Filter by package name", required = false)
                 string("text_filter", "Search in title/text", required = false)
-            }
+            },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+                latencyClass = LatencyClass.FAST
+                permission("BIND_NOTIFICATION_LISTENER_SERVICE")
+                failureMode(
+                    pattern = "listener not connected|no listener|not enabled",
+                    hint = "Grant 'Notification Access' to LLM Notify Tools in System Settings > Notifications > Notification Access.",
+                )
+                example(intent = "Show all notifications from WhatsApp.") { args ->
+                    args["package_filter"] = "com.whatsapp"
+                }
+            },
         ) { args ->
             val pkgFilter = args["package_filter"]?.jsonPrimitive?.contentOrNull
             val textFilter = args["text_filter"]?.jsonPrimitive?.contentOrNull?.lowercase()
-            val listener = NotifyListenerService.instance ?: return@textTool "NotificationListener not connected"
+            val listener = NotifyListenerService.instance
+                ?: throw IllegalStateException("listener not connected")
             var notifications = listener.activeNotifications.toList()
             if (pkgFilter != null) notifications = notifications.filter { it.packageName == pkgFilter }
             val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
