@@ -1,8 +1,10 @@
 package com.llmintentions.people
 
+import android.Manifest
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.content.pm.PackageManager
 import android.provider.CalendarContract
 import android.provider.ContactsContract
 import com.androidmcp.core.protocol.LatencyClass
@@ -15,6 +17,12 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 object PeopleToolRegistrar {
+
+    private fun requirePermission(ctx: Context, permission: String) {
+        if (ctx.checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+            throw SecurityException("Permission not granted: $permission")
+        }
+    }
 
     fun register(registry: ToolRegistry, ctx: Context) {
 
@@ -34,6 +42,7 @@ object PeopleToolRegistrar {
                 }
             },
         ) { args ->
+            requirePermission(ctx, Manifest.permission.READ_CONTACTS)
             val query = args["query"]?.jsonPrimitive?.content ?: ""
             val cursor = ctx.contentResolver.query(ContactsContract.Contacts.CONTENT_URI,
                 arrayOf(ContactsContract.Contacts._ID, ContactsContract.Contacts.DISPLAY_NAME_PRIMARY, ContactsContract.Contacts.HAS_PHONE_NUMBER),
@@ -93,6 +102,7 @@ object PeopleToolRegistrar {
                 }
             },
         ) { args ->
+            requirePermission(ctx, Manifest.permission.WRITE_CONTACTS)
             val name = args["name"]?.jsonPrimitive?.content ?: ""; val phone = args["phone"]?.jsonPrimitive?.contentOrNull; val email = args["email"]?.jsonPrimitive?.contentOrNull
             val ops = ArrayList<android.content.ContentProviderOperation>()
             ops.add(android.content.ContentProviderOperation.newInsert(ContactsContract.RawContacts.CONTENT_URI)
@@ -135,6 +145,7 @@ object PeopleToolRegistrar {
                 }
             },
         ) { args ->
+            requirePermission(ctx, Manifest.permission.WRITE_CONTACTS)
             val id = args["contact_id"]?.jsonPrimitive?.content ?: ""
             val deleted = ctx.contentResolver.delete(ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, id.toLong()), null, null)
             if (deleted > 0) "Contact $id deleted" else "Contact $id not found"
@@ -175,6 +186,7 @@ object PeopleToolRegistrar {
                 example(intent = "What's on my calendar today?") { _ -> }
             },
         ) {
+            requirePermission(ctx, Manifest.permission.READ_CALENDAR)
             val dtf = SimpleDateFormat("HH:mm", Locale.US)
             val startMs = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0) }.timeInMillis
             val endMs = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 59) }.timeInMillis
@@ -208,6 +220,7 @@ object PeopleToolRegistrar {
                 }
             },
         ) { args ->
+            requirePermission(ctx, Manifest.permission.WRITE_CALENDAR)
             val df = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
             val title = args["title"]?.jsonPrimitive?.content ?: ""
             val startMs = try { df.parse(args["start"]?.jsonPrimitive?.content ?: "")?.time } catch (_: Exception) { null } ?: System.currentTimeMillis()
