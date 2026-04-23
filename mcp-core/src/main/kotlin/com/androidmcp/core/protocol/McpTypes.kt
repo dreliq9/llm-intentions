@@ -4,7 +4,7 @@ import kotlinx.serialization.*
 import kotlinx.serialization.json.*
 
 /** MCP protocol version */
-const val MCP_PROTOCOL_VERSION = "2025-03-26"
+const val MCP_PROTOCOL_VERSION = "2025-06-18"
 
 // --- Initialize ---
 
@@ -65,16 +65,33 @@ data class Implementation(
 
 // --- Tools ---
 
+/**
+ * Tool annotations describing behavior to clients (advisory; clients should
+ * not rely on these for security-critical decisions). Spec 2025-06-18.
+ */
+@Serializable
+data class ToolAnnotations(
+    val title: String? = null,
+    val readOnlyHint: Boolean? = null,
+    val destructiveHint: Boolean? = null,
+    val idempotentHint: Boolean? = null,
+    val openWorldHint: Boolean? = null
+)
+
 @Serializable
 data class ToolInfo(
     val name: String,
     val description: String,
-    val inputSchema: JsonObject
+    val inputSchema: JsonObject,
+    val title: String? = null,
+    val outputSchema: JsonObject? = null,
+    val annotations: ToolAnnotations? = null
 )
 
 @Serializable
 data class ToolsListResult(
-    val tools: List<ToolInfo>
+    val tools: List<ToolInfo>,
+    val nextCursor: String? = null
 )
 
 @Serializable
@@ -83,9 +100,19 @@ data class ToolCallParams(
     val arguments: JsonObject? = null
 )
 
+/**
+ * Tool result payload.
+ *
+ * - [content]: human-readable text/image/resource blocks (always present).
+ * - [structuredContent]: typed JSON shape for clients that understand the
+ *   tool's outputSchema. Optional. Spec 2025-06-18.
+ * - [isError]: true if the tool failed; clients should surface this rather
+ *   than treating the response as success.
+ */
 @Serializable
 data class ToolCallResult(
     val content: List<ContentBlock>,
+    val structuredContent: JsonObject? = null,
     val isError: Boolean = false
 )
 
@@ -96,5 +123,68 @@ data class ContentBlock(
 ) {
     companion object {
         fun text(value: String) = ContentBlock(type = "text", text = value)
+    }
+}
+
+// --- Resources (spec 2025-06-18) ---
+
+/**
+ * A discoverable resource the server exposes for clients to read.
+ *
+ * Resources are content the LLM can pull on demand without making a tool
+ * call — appropriate for things that are "state to read" rather than
+ * "actions to take". Examples: a notification thread, a calendar event,
+ * a recent files listing.
+ */
+@Serializable
+data class Resource(
+    val uri: String,
+    val name: String,
+    val title: String? = null,
+    val description: String? = null,
+    val mimeType: String? = null,
+    val size: Long? = null,
+    val annotations: ResourceAnnotations? = null
+)
+
+@Serializable
+data class ResourceAnnotations(
+    val audience: List<String>? = null,
+    val priority: Double? = null
+)
+
+@Serializable
+data class ResourcesListResult(
+    val resources: List<Resource>,
+    val nextCursor: String? = null
+)
+
+@Serializable
+data class ReadResourceParams(
+    val uri: String
+)
+
+@Serializable
+data class ReadResourceResult(
+    val contents: List<ResourceContents>
+)
+
+/**
+ * Contents returned by resources/read. Either [text] or [blob] is set,
+ * never both. [blob] is base64-encoded when present.
+ */
+@Serializable
+data class ResourceContents(
+    val uri: String,
+    val mimeType: String? = null,
+    val text: String? = null,
+    val blob: String? = null
+) {
+    companion object {
+        fun text(uri: String, text: String, mimeType: String? = "text/plain") =
+            ResourceContents(uri = uri, text = text, mimeType = mimeType)
+
+        fun blob(uri: String, blobBase64: String, mimeType: String) =
+            ResourceContents(uri = uri, blob = blobBase64, mimeType = mimeType)
     }
 }
