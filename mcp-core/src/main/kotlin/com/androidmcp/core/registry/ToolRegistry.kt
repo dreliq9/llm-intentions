@@ -151,3 +151,58 @@ fun ToolRegistry.envelopeTool(
         },
     ))
 }
+
+/**
+ * DSL builder for ToolMetadata. Use via `toolMetadata { ... }`.
+ *
+ * Supports destructive/idempotent/latencyClass assignment, permission() / failureMode()
+ * accumulators, and an example() builder that captures args as a JsonObject.
+ */
+class ToolMetadataBuilder {
+    var destructive: Boolean = false
+    var idempotent: Boolean = true
+    var latencyClass: LatencyClass = LatencyClass.FAST
+    private val permissions = mutableListOf<String>()
+    private val failureModes = mutableListOf<FailureMode>()
+    private val examples = mutableListOf<ToolExample>()
+
+    fun permission(name: String) { permissions.add(name) }
+
+    fun failureMode(pattern: String? = null, exceptionType: String? = null, hint: String) {
+        require(pattern != null || exceptionType != null) {
+            "failureMode needs a pattern or an exceptionType"
+        }
+        failureModes.add(FailureMode(pattern, exceptionType, hint))
+    }
+
+    fun example(intent: String, argsBuilder: (MutableMap<String, Any>) -> Unit) {
+        val map = mutableMapOf<String, Any>()
+        argsBuilder(map)
+        val args = buildJsonObject {
+            for ((k, v) in map) {
+                when (v) {
+                    is String -> put(k, v)
+                    is Int -> put(k, v)
+                    is Long -> put(k, v)
+                    is Double -> put(k, v)
+                    is Float -> put(k, v)
+                    is Boolean -> put(k, v)
+                    else -> put(k, v.toString())
+                }
+            }
+        }
+        examples.add(ToolExample(args = args, intent = intent))
+    }
+
+    fun build(): ToolMetadata = ToolMetadata(
+        examples = examples.toList(),
+        permissions = permissions.toList(),
+        destructive = destructive,
+        idempotent = idempotent,
+        latencyClass = latencyClass,
+        failureModes = failureModes.toList(),
+    )
+}
+
+fun toolMetadata(block: ToolMetadataBuilder.() -> Unit): ToolMetadata =
+    ToolMetadataBuilder().apply(block).build()
