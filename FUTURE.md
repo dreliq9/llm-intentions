@@ -10,7 +10,7 @@ The headline shift was making tool failures self-explanatory.
 - **`toolMetadata` DSL.** Tools declare `destructive`, `idempotent`, `latencyClass`, required permissions, regex `failureMode(pattern, hint)` entries, and parameter examples alongside the schema.
 - **Failure-mode hints.** When a handler throws, `Envelope.fromException` regex-matches the exception against the tool's `failureModes` and injects the actionable hint. The LLM sees `Hint: Grant POST_NOTIFICATIONS in Settings → Apps → Notify` instead of `Error: SecurityException`.
 - **`textTool` / `envelopeTool` helpers.** New tools register through these wrappers; handlers just throw on hard errors and the framework formats the envelope.
-- **Coverage so far.** `tool-device` (6), `tool-notify` (5), `tool-people` (5), `taichi-android` (7), and the canary set in `termux-mcp` are on the new envelope + metadata.
+- **Coverage so far.** `tool-device` (14), `tool-notify` (7), `tool-people` (10), `tool-files-dev` (20), `taichi-android` (46), and the canary set in `termux-mcp` (6) are on the new envelope + metadata.
 
 See [AGENTS.md](AGENTS.md) for the CapApp-author contract and the common antipatterns to avoid.
 
@@ -20,7 +20,7 @@ See [AGENTS.md](AGENTS.md) for the CapApp-author contract and the common antipat
 
 ### Finish the metadata sweep
 
-- **termux-mcp** — 6 tools on `textTool`, 18 still on the legacy `register()` pattern. Mechanical follow-up; same wire format, same metadata shape.
+- **termux-mcp** — 6 tools on `textTool`, 18 still on the legacy `server.tool(...)` pattern. Mechanical follow-up; same wire format, same metadata shape.
 - **Catch-and-stringify cleanup** — periodic audit for handlers that swallow exceptions and return formatted error strings (renders as `OK: succeeded` with garbage data). Easy to spot, tedious to fix.
 - **Wrapper-metadata threading** — anywhere a handler is re-registered (logging wrappers, call recorders), `metadata = tool.metadata` has to be threaded through or failure-mode hints silently break. Regression test lives in `mcp-intent-api`.
 
@@ -38,7 +38,7 @@ Four CapApps (`tool-device`, `tool-notify`, `tool-people`, `tool-files-dev`) dup
 
 ### Cross-platform
 
-- **macOS Hub** — working prototype at `llm-intentions-mac/` (stdlib Python HTTP server, JSON tool manifests, AppleScript bridge, 10 demo tools). Same wire protocol as Android. Next: bring the envelope + metadata DSL to the Mac side, publish the tool catalog.
+- **macOS Hub** — working prototype at `llm-intentions-mac/` (stdlib Python HTTP server on `:8177`, JSON tool manifests, AppleScript bridge, 28 demo tools across `command`, `applescript`, `script`, `shortcut`, and `http` types). Same wire protocol as Android. Next: bring the envelope + metadata DSL to the Mac side, publish the tool catalog.
 - **iOS** — not started. App Intents / SiriKit are the obvious bridges. The protocol and envelope are reusable.
 
 ### SDK distribution
