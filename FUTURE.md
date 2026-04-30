@@ -1,67 +1,62 @@
 # Future Development
 
-## Critical: Content Provider Authentication
+For the current working state, see [README.md](README.md) and [ARCHITECTURE.md](ARCHITECTURE.md). This document is what's coming.
 
-The Content Provider is currently `exported=true` with no access control. Any app on the device can call MCP tools. This is fine for the demo but **must be locked down before Taichi ships** — paper trading balances, API keys, and analysis data should not be accessible to arbitrary apps.
+## Done — Wave 2 (April 2026)
 
-### Options (pick one or layer them)
+The headline shift was making tool failures self-explanatory.
 
-**Signature-level permission (recommended)**
-Declare a custom permission with `protectionLevel="signature"`. Only apps signed with the same key can access the provider. Problem: Termux is signed by its own developer, not us. This only works if the bridge is bundled into the Taichi APK itself.
+- **Canonical envelope.** Every tool response renders as `OK|WARN|FAIL: <summary>` plus an optional `Hint:` line and the data or exception payload (`mcp-core` via `Envelope.renderText()`). Clients no longer parse free-form text to tell success from failure.
+- **`toolMetadata` DSL.** Tools declare `destructive`, `idempotent`, `latencyClass`, required permissions, regex `failureMode(pattern, hint)` entries, and parameter examples alongside the schema.
+- **Failure-mode hints.** When a handler throws, `Envelope.fromException` regex-matches the exception against the tool's `failureModes` and injects the actionable hint. The LLM sees `Hint: Grant POST_NOTIFICATIONS in Settings → Apps → Notify` instead of `Error: SecurityException`.
+- **`textTool` / `envelopeTool` helpers.** New tools register through these wrappers; handlers just throw on hard errors and the framework formats the envelope.
+- **Coverage so far.** `tool-device` (6), `tool-notify` (5), `tool-people` (5), `taichi-android` (7), and the canary set in `termux-mcp` are on the new envelope + metadata.
 
-**Token-based auth**
-Bridge passes a shared secret via the Bundle extras. Taichi checks it before processing. The token lives in a file in Termux's private storage, written once during setup. Simple, works cross-signature.
-
-**Android App Links / package verification**
-Check `Binder.getCallingUid()` in the Content Provider and verify it belongs to an allowlisted package (e.g., `com.termux`). Lightweight, no tokens, but spoofable on rooted devices.
-
-**Hybrid approach**
-Package check (is the caller Termux?) + token (does Termux have the right secret?). Two layers, covers rooted devices.
-
-### When to implement
-Before any real API keys, portfolio data, or trading logic goes through the Content Provider. Lock it down before Taichi goes live.
+See [AGENTS.md](AGENTS.md) for the CapApp-author contract and the common antipatterns to avoid.
 
 ---
 
-## Completed in v2
+## In flight
 
-- ~~Service discovery between apps~~ — `AppDiscoveryManager` + `PackageChangeReceiver`
-- ~~Notification tools~~ — send, cancel, list channels
-- ~~File sharing~~ — `android.share_file` (path) + `android.share_content` (base64) via FileProvider
-- ~~Device control tools~~ — torch, vibrate, toast, ringer, brightness, media
-- ~~Hub meta-tools~~ — status, health, refresh
-- ~~Thread safety~~ — ConcurrentHashMap, background refresh, Android 14+ fix
-- ~~Unit tests~~ — ToolRegistry, McpDispatcher, JsonSchemaBuilder
+### Finish the metadata sweep
 
-## Completed in v3
+- **termux-mcp** — 6 tools on `textTool`, 18 still on the legacy `register()` pattern. Mechanical follow-up; same wire format, same metadata shape.
+- **Catch-and-stringify cleanup** — periodic audit for handlers that swallow exceptions and return formatted error strings (renders as `OK: succeeded` with garbage data). Easy to spot, tedious to fix.
+- **Wrapper-metadata threading** — anywhere a handler is re-registered (logging wrappers, call recorders), `metadata = tool.metadata` has to be threaded through or failure-mode hints silently break. Regression test lives in `mcp-intent-api`.
 
-- ~~Async job system~~ — `JobManager` in mcp-core, `mcp_async`/`mcp_poll`/`mcp_cancel`/`mcp_jobs` methods on Content Provider. Bridge `--async` mode with transparent polling.
-- ~~Reverse channel / Inbox~~ — `InboxManager` stores messages, `hub.inbox` + `hub.inbox_clear` tools for Claude to read.
-- ~~Share-to-Claude~~ — `ShareReceiveActivity` registered as Android share target. Text, images, documents all handled. Shows "Send to Claude" in share sheet.
-- ~~Intent inbox~~ — `InboxReceiver` accepts `com.androidmcp.SEND_MESSAGE` broadcasts from automation apps (Tasker, MacroDroid, etc.)
-- ~~Job management tools~~ — `hub.jobs` lists active/recent, `hub.cancel_job` cancels running jobs
-- ~~JobManager tests~~ — submit, poll, cancel, fail, list, response ID matching
+### Shared CapApp UI module
+
+Four CapApps (`tool-device`, `tool-notify`, `tool-people`, `tool-files-dev`) duplicate ~95% of the same in-app code (tool list adapter, execute sheet, call log, log dialog). Extract into `:tool-ui-common` when someone needs to modify a copy — premature extraction is a worse failure mode than duplication here.
+
+### Hub proxy retirement
+
+`hub/hub-proxy.js` is a pass-through Node server on `:8381` that normalizes HTTP wire details for clients that don't tolerate the Hub's raw-socket output. Workaround, not a permanent layer — long-term goal is for MCP clients to hit `:8379/mcp` directly.
 
 ---
 
-## v4+ Roadmap
+## Roadmap
 
-### On-device LLM integration
-When local models (llama.cpp, MLX) can run on Android with tool-use support, the Content Provider path means they get MCP tools for free — same `content://` URI, no HTTP needed.
+### Cross-platform
 
-### Play Store distribution
-`exported=true` Content Providers will get flagged in Play Store review. The auth solution above resolves this. Also need ProGuard rules for kotlinx-serialization.
+- **macOS Hub** — working prototype at `llm-intentions-mac/` (stdlib Python HTTP server, JSON tool manifests, AppleScript bridge, 10 demo tools). Same wire protocol as Android. Next: bring the envelope + metadata DSL to the Mac side, publish the tool catalog.
+- **iOS** — not started. App Intents / SiriKit are the obvious bridges. The protocol and envelope are reusable.
 
-### iOS equivalent
-iOS doesn't have Content Providers. The equivalent would be App Groups + shared container, or a local XPC service. Separate project if needed.
+### SDK distribution
 
-### Additional tool categories to consider
-- **Contacts / SMS** — Read contacts, send SMS. Needs dangerous permissions (READ_CONTACTS, SEND_SMS). Add when there's a clear use case.
-- **Location** — Get GPS coordinates. Needs ACCESS_FINE_LOCATION. Useful for context-aware actions.
-- **Camera capture** — Take a photo and return the path. Needs CAMERA permission + foreground activity. Complex to implement from a Content Provider.
-- **Sensor data** — Accelerometer, gyroscope, proximity. Interesting for hardware projects but niche.
-- **Accessibility Service** — Read screen content, perform UI actions. Extremely powerful but requires user to manually enable in settings. Could enable "what's on my screen?" queries.
+- **Maven Central** — publish `mcp-intent-api` and `mcp-core` so third parties can build CapApps without vendoring source. Main blocker is signing infrastructure.
+- **Play Store** — Hub APK on Play. The previous blocker (`exported=true` Content Provider) is gone with the HTTP-only architecture; remaining work is store-listing assets, ProGuard rules for `kotlinx-serialization`, and a privacy policy.
 
-### Bridge improvements to consider
-- **Bidirectional channel** — Currently the bridge only handles client→server. For true push notifications (inbox alerts, price alerts from Taichi), the bridge would need to poll and emit MCP notifications on stdout. This is a protocol extension beyond standard MCP.
-- **WebSocket transport** — Alternative to stdio that supports bidirectional communication natively. Would need a small HTTP server in Termux or the Hub.
+### Protocol
+
+- **Intent Mesh** — still an experiment (see [spec/intent-mesh.md](spec/intent-mesh.md)). Real workflows are manual today; the target is automated routing across multiple LLMs, picked per task. Needs a formal handshake, a session contract, and output attribution.
+- **Server → client push** — currently the Hub is strictly request/response. For inbox notifications and price alerts to reach the LLM without polling, the Hub would need to emit MCP notifications. Possible over streamable-http with the right transport.
+
+### Capabilities to grow into
+
+- **On-device LLM tool-use** — when llama.cpp / MLX-Android / equivalent ship Android tool-use, they hit the Hub on localhost with no network round-trip. The path is already supported; we just need a local client.
+- **Accessibility Service** — read screen content and perform UI actions. Extremely powerful, requires manual user enable, large privacy surface. Would unlock "what's on my screen?" queries and full UI automation.
+- **Camera / mic capture as CapApps** — currently exposed via `termux-mcp`. Native-Android camera in a CapApp requires a foreground activity; tradeoff between UX and tool availability.
+
+---
+
+This list is not exhaustive — it's what's actively on the radar. Issues and PRs welcome.
