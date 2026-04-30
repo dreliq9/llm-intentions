@@ -2,7 +2,7 @@
 
 > An open protocol and toolkit for turning Android apps into MCP tool servers, using Android Intents as the native routing layer.
 
-**Status: Alpha** — Running in production on a real device. 118 tools, 8 sources, one phone.
+**Status: Alpha** — Running in production on a real device. Self-explanatory tool failures via the Wave 2 envelope. Multi-CapApp Hub.
 
 ## What is this?
 
@@ -13,6 +13,31 @@ The **Hub** is the central gateway. It discovers installed CapApps via Android I
 This isn't a spec or a proposal. It's a working system.
 
 **Coming next: Intent Mesh** — an experimental protocol for routing work between multiple LLMs on the same device. Early scripts and a draft spec are included in this repo.
+
+## Self-explanatory tool failures
+
+Every tool response on LLM Intentions renders as a canonical envelope:
+
+```
+OK: contacts_search returned 3 contacts
+
+[
+  { "name": "Ada Lovelace", "phone": "+1..." },
+  ...
+]
+```
+
+```
+FAIL: notify.post failed: SecurityException
+Hint: Grant POST_NOTIFICATIONS in Settings → Apps → Notify
+
+Raw:
+{ "type": "SecurityException", "message": "..." }
+```
+
+The `Hint:` line comes from the tool's `toolMetadata { failureMode(pattern, hint) }` block — a regex matched against the thrown exception. When a permission is denied, an API rate-limits, or a sensor isn't on this device, the LLM sees an actionable hint instead of a stack trace.
+
+CapApp authors get this for free: throw on hard errors, declare a `failureMode` for each known failure shape, and the framework formats the envelope. See [AGENTS.md](AGENTS.md) for the full author contract.
 
 ## Architecture
 
@@ -75,9 +100,11 @@ Think of it like a microservice, but instead of HTTP endpoints, it exposes LLM t
 
 | CapApp | Package | Tools | What it does |
 |---------|---------|-------|-------------|
-| **Files** | `com.llmintentions.files` | 15 | File system operations, downloads, media access |
+| **Files** | `com.llmintentions.files` | 20 | File system operations, downloads, media access |
 | **Notify** | `com.llmintentions.notify` | 7 | Read, filter, dismiss, reply to notifications |
 | **People** | `com.llmintentions.people` | 10 | Contacts, calendars, events |
+| **Device** | `com.llmintentions.device` | 14 | Sensors, TTS, vibration, clipboard |
+| **Taichi** | `com.taichi.android` | 46 | Paper crypto trading, on-chain data, portfolio |
 
 ### Built-in Hub Tools
 
@@ -87,12 +114,16 @@ Think of it like a microservice, but instead of HTTP endpoints, it exposes LLM t
 | `system.*` | 15 | Battery, clipboard, wifi, volume, torch, brightness, media control |
 | `hub.*` | 5 | Status, health, refresh, inbox (Android share → LLM) |
 
+### Termux bridge
+
+`termux-mcp` is a separate Node.js MCP server that exposes Termux's APIs (battery, camera, location, SMS, sensors, etc.) under the `termux.*` namespace. It runs alongside the Hub and shares the same envelope wire format.
+
 ## Platform Support
 
 | Platform | Hub | IPC Layer | Status |
 |----------|-----|-----------|--------|
 | **Android** | LLM Intentions Hub | Android Intents | Alpha — running in production |
-| **macOS** | LLM Intentions for Mac | Apple URL Schemes / Shortcuts | In development |
+| **macOS** | LLM Intentions for Mac | AppleScript / Shortcuts / shell | Prototype — 28 demo tools, JSON tool manifests |
 
 Both versions expose tools over MCP via wifi, so your MCP client can talk to tools on any device on the network. Same protocol, native IPC on each platform.
 
@@ -102,8 +133,8 @@ Both versions expose tools over MCP via wifi, so your MCP client can talk to too
 |---|---|---|
 | **Architecture** | Distributed CapApps + central Hub | Single MCP server |
 | **Extensibility** | Any APK can be a CapApp — install and go | Monolithic codebase |
+| **Failure semantics** | Canonical envelope + regex-matched hints | Free-form text |
 | **Multi-LLM** | Intent Mesh (experimental) | Single client model |
-| **Tool count** | 118 tools across 8 sources | Spec-stage |
 | **Transport** | Android Intents (native IPC) | Android Intents |
 | **Discovery** | Automatic via AndroidMCP protocol | PackageManager query |
 | **Production status** | Running daily on real hardware | Published spec |
@@ -135,7 +166,7 @@ npm install
 # Terminal 1: termux-mcp (exposes Termux APIs as MCP tools)
 node server.js
 
-# Terminal 2: hub-proxy (bridges Hub to MCP clients)
+# Terminal 2: hub-proxy (bridges Hub to MCP clients on :8381)
 node hub-proxy.js
 ```
 
@@ -160,9 +191,11 @@ Call `hub.status` — you should see all discovered CapApps and their tool count
 
 ## Build Your Own CapApp
 
-See the [CapApp template](capapps/template/) for a skeleton you can fork.
+See the [CapApp template](capapp-template/) for a skeleton you can fork.
 
-See the [CapApp Protocol Spec](spec/capapp-protocol.md) for the full registration and discovery protocol.
+See [AGENTS.md](AGENTS.md) for the canonical author contract — the `textTool` / `envelopeTool` helpers, the `toolMetadata` DSL, and the antipatterns to avoid.
+
+See [spec/capapp-protocol.md](spec/capapp-protocol.md) for the full registration and discovery protocol.
 
 ## Project Structure
 
@@ -170,12 +203,21 @@ See the [CapApp Protocol Spec](spec/capapp-protocol.md) for the full registratio
 llm-intentions/
 ├── README.md                 # You are here
 ├── ARCHITECTURE.md           # Detailed system design
+├── AGENTS.md                 # Contract for LLMs and CapApp authors
+├── FUTURE.md                 # Roadmap and in-flight work
 ├── LICENSE                   # Apache 2.0
-├── hub/                      # Hub proxy and bridge code
-├── termux-mcp/               # Termux API → MCP server
+├── mcp-core/                 # Pure-JVM core: Envelope, ToolRegistry, DSL
+├── mcp-intent-api/           # Android lib: ToolAppService, IPC
+├── llm-intentions/           # Hub APK
+├── tool-device/              # Device sensors, TTS, clipboard CapApp
+├── tool-notify/              # Notifications CapApp
+├── tool-people/              # Contacts + calendar CapApp
+├── tool-files-dev/           # Filesystem CapApp
+├── taichi-android/           # Paper crypto trading CapApp
+├── termux-mcp/               # Node.js MCP server for Termux APIs
+├── hub/                      # hub-proxy Node passthrough
 ├── intent-mesh/              # Multi-LLM routing (experimental)
-├── capapps/
-│   └── template/             # Skeleton for building new CapApps
+├── capapp-template/          # Skeleton for building new CapApps
 ├── spec/
 │   ├── capapp-protocol.md      # How CapApps register and expose tools
 │   └── intent-mesh.md        # Multi-LLM routing protocol
