@@ -99,17 +99,97 @@ When Hub discovers a CapApp, it prefixes all of that app's tools with a namespac
 | Files CapApp | `files.*`, `fs.*` | `files.file_read` |
 | Notify CapApp | `notify.*` | `notify.notifications_list` |
 | People CapApp | `people.*` | `people.contacts_search` |
+| Device CapApp | `device.*` | `device.sensor_read` |
+| Taichi CapApp | `taichi.*` | `taichi.paper_trade` |
+| Termux bridge | `termux.*` | `termux.battery` |
 
 External CapApps can expose tools under multiple namespaces if they provide distinct capability groups (e.g., Files exposes both `files.*` for user-facing operations and `fs.*` for low-level filesystem access).
+
+## Response Envelope and Tool Metadata
+
+Every tool response in LLM Intentions is wrapped in a canonical envelope. This is the system's primary mechanism for making tool failures self-explanatory to the LLM.
+
+### Envelope shape
+
+The envelope has three states:
+
+```
+OK: <one-line summary>
+
+<data JSON>
+```
+
+```
+WARN: <one-line summary>
+Hint: <optional actionable line>
+
+<partial data JSON>
+```
+
+```
+FAIL: <one-line summary>
+Hint: <actionable line>
+
+Raw:
+<exception JSON>
+```
+
+The wire format is plain text — `Envelope.renderText()` in `mcp-core` produces it. The Node-side `termux-mcp` server has its own `envelope.js` that mirrors the same contract.
+
+### Tool metadata
+
+Every tool registers with a metadata block alongside its parameter schema:
+
+```kotlin
+registry.textTool(
+    name = "contacts_search",
+    description = "...",
+    params = jsonSchema { string("query", "...") },
+    metadata = toolMetadata {
+        destructive = false
+        idempotent = true
+        latencyClass = LatencyClass.FAST
+        permission("READ_CONTACTS")
+        failureMode(
+            pattern = "permission|SecurityException",
+            hint = "Grant READ_CONTACTS in Settings → Apps → People."
+        )
+        example(intent = "Find Ada in contacts") { args -> args["query"] = "Ada" }
+    },
+) { args -> doSearch(args) }
+```
+
+The metadata declares:
+- **Behavior** — `destructive`, `idempotent`, `latencyClass` so the LLM can decide whether to confirm a call.
+- **Permissions** — Android permissions the tool needs. Surfaced in `hub.status` so the user can see what's missing.
+- **Failure modes** — regex patterns matched against thrown exception messages, each paired with an actionable hint.
+- **Examples** — sample arg sets that the LLM (or a fixture) can use as a starting point.
+
+### Failure-mode resolution
+
+When a tool handler throws, the framework calls `Envelope.fromException(toolName, metadata, exception)`. That function:
+
+1. Captures the exception type and message.
+2. Iterates the tool's `failureModes` and returns the first hint whose `pattern` matches the message (or whose `exceptionType` matches the simple/canonical class name).
+3. Renders a `FAIL:` envelope with the hint inlined.
+
+The result: the LLM sees `Hint: Grant READ_CONTACTS in Settings → Apps → People.` instead of `Error: SecurityException: Permission denial`.
+
+### Why this matters
+
+A tool that returns "Error: 403" tells an LLM nothing actionable. A tool that returns `FAIL: rate limited / Hint: wait 60s and retry` lets the agent recover without escalating to the user. Aggregated across hundreds of tools, the difference is whether an LLM agent feels reliable or feels broken.
+
+See [AGENTS.md](AGENTS.md) for the CapApp-author rules (throw on hard errors, ship metadata, don't catch-and-stringify) and [FUTURE.md](FUTURE.md) for the rollout status across CapApps.
 
 ## Data Flow: Tool Call
 
 1. MCP client sends `tools/call` with `name: "files.file_read"` to Hub
 2. Hub's namespace router identifies the target CapApp: `com.llmintentions.files`
 3. Hub constructs an Android Intent with the tool name and parameters as extras
-4. Intent is delivered to the CapApp's `CommandGatewayService`
-5. CapApp executes the operation and returns results via the Intent response
-6. Hub wraps the result in MCP format and returns it to the client
+4. Intent is delivered to the CapApp's `ToolAppService` via `startService`
+5. CapApp executes the operation; result (or thrown exception) goes through `Envelope.renderText()` in the CapApp process
+6. CapApp returns the rendered envelope to Hub via a broadcast reply keyed by callback ID
+7. Hub forwards the envelope text to the MCP client
 
 ## Data Flow: Intent Mesh
 
@@ -129,4 +209,6 @@ External CapApps can expose tools under multiple namespaces if they provide dist
 
 ## Adding a New CapApp
 
-See [capapps/template/](capapps/template/) for a starter project and [spec/capapp-protocol.md](spec/capapp-protocol.md) for the registration protocol.
+See [capapp-template/](capapp-template/) for a starter project and [spec/capapp-protocol.md](spec/capapp-protocol.md) for the registration protocol.
+
+The author contract: extend `ToolAppService`, register tools through `registry.textTool(...)` with a `toolMetadata { ... }` block, and let exceptions propagate. The framework formats the envelope and threads the failure-mode hint. See [AGENTS.md](AGENTS.md) for the antipatterns to avoid (the most common is `try { ... } catch (e) { "Error: ${e.message}" }`, which silently masks real failures and renders as `OK: succeeded`).
