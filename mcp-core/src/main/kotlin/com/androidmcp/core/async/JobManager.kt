@@ -43,12 +43,16 @@ class JobManager(
     /**
      * Submit a JSON-RPC request for async execution.
      * Returns a job ID immediately.
+     *
+     * The coroutine is created LAZY so the ManagedJob is visible in [jobs] before any
+     * handler can complete. Without that ordering, a fast tool/failure can finish between
+     * launch() and map insertion, observe no record to update, and remain RUNNING forever.
      */
     fun submit(request: JsonRpcRequest): String {
         cleanup() // Opportunistic cleanup of old jobs
 
         val jobId = UUID.randomUUID().toString().take(12)
-        val coroutineJob = scope.launch {
+        val coroutineJob = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 val result = dispatcher.dispatch(request)
                 // Don't overwrite if already cancelled
@@ -83,6 +87,7 @@ class JobManager(
             method = request.method,
             coroutineJob = coroutineJob
         )
+        coroutineJob.start()
 
         return jobId
     }
