@@ -16,13 +16,15 @@ import kotlin.test.assertTrue
 
 class ModernProtocolTest {
 
-    private fun modernMeta(): JsonObject = buildJsonObject {
+    private fun modernMeta(includeCapabilities: Boolean = true): JsonObject = buildJsonObject {
         put("io.modelcontextprotocol/protocolVersion", MCP_MODERN_PROTOCOL_VERSION)
         put("io.modelcontextprotocol/clientInfo", buildJsonObject {
             put("name", "test-client")
             put("version", "1.0.0")
         })
-        put("io.modelcontextprotocol/clientCapabilities", buildJsonObject { })
+        if (includeCapabilities) {
+            put("io.modelcontextprotocol/clientCapabilities", buildJsonObject { })
+        }
     }
 
     @Test
@@ -78,6 +80,33 @@ class ModernProtocolTest {
     }
 
     @Test
+    fun `modern ping gets required complete result type`() = runBlocking {
+        val dispatcher = McpDispatcher()
+        val response = dispatcher.dispatch(JsonRpcRequest(
+            method = "ping",
+            params = buildJsonObject { put("_meta", modernMeta()) },
+            id = JsonPrimitive(1),
+        ))!!
+
+        assertEquals(
+            MCP_RESULT_COMPLETE,
+            response.result!!.jsonObject["resultType"]!!.jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun `modern request missing client capabilities is invalid params`() = runBlocking {
+        val dispatcher = McpDispatcher()
+        val response = dispatcher.dispatch(JsonRpcRequest(
+            method = "server/discover",
+            params = buildJsonObject { put("_meta", modernMeta(includeCapabilities = false)) },
+            id = JsonPrimitive(1),
+        ))!!
+
+        assertEquals(JsonRpcError.INVALID_PARAMS, response.error!!.code)
+    }
+
+    @Test
     fun `modern unknown tool is invalid params not unknown rpc method`() = runBlocking {
         val dispatcher = McpDispatcher(toolRegistry = ToolRegistry())
         val response = dispatcher.dispatch(JsonRpcRequest(
@@ -94,9 +123,37 @@ class ModernProtocolTest {
     }
 
     @Test
-    fun `textTool maps rich metadata to standard MCP annotations`() {
-        val registry = ToolRegistry()
-        registry.textTool(
+    fun `modern initialize method is not available`() = runBlocking {
+        val dispatcher = McpDispatcher()
+        val response = dispatcher.dispatch(JsonRpcRequest(
+            method = "initialize",
+            params = buildJsonObject { put("_meta", modernMeta()) },
+            id = JsonPrimitive(1),
+        ))!!
+
+        assertEquals(JsonRpcError.METHOD_NOT_FOUND, response.error!!.code)
+    }
+
+    @Test
+    fun `textTool maps legacy safety metadata to conservative MCP annotations`() {
+        val readRegistry = ToolRegistry()
+        readRegistry.textTool(
+            name = "safe_read",
+            description = "Test read",
+            params = jsonSchema { },
+            metadata = toolMetadata {
+                destructive = false
+                idempotent = true
+            },
+        ) { "ok" }
+
+        val readAnnotations = assertNotNull(readRegistry.list().single().annotations)
+        assertTrue(readAnnotations.readOnlyHint == true)
+        assertFalse(readAnnotations.destructiveHint == true)
+        assertTrue(readAnnotations.idempotentHint == true)
+
+        val writeRegistry = ToolRegistry()
+        writeRegistry.textTool(
             name = "dangerous_write",
             description = "Test mutation",
             params = jsonSchema { },
@@ -106,9 +163,9 @@ class ModernProtocolTest {
             },
         ) { "ok" }
 
-        val tool = registry.list().single()
-        val annotations = assertNotNull(tool.annotations)
-        assertTrue(annotations.destructiveHint == true)
-        assertFalse(annotations.idempotentHint == true)
+        val writeAnnotations = assertNotNull(writeRegistry.list().single().annotations)
+        assertFalse(writeAnnotations.readOnlyHint == true)
+        assertTrue(writeAnnotations.destructiveHint == true)
+        assertFalse(writeAnnotations.idempotentHint == true)
     }
 }
