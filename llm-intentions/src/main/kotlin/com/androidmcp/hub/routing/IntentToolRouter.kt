@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
-import android.util.Log
 import com.androidmcp.core.protocol.*
 import com.androidmcp.core.registry.McpToolDef
 import com.androidmcp.core.registry.ToolRegistry
@@ -37,11 +36,17 @@ class IntentToolRouter(private val context: Context) {
                     originalToolName = tool.name
                 )
 
+                // Preserve the complete MCP-visible descriptor. CapApps may publish title,
+                // outputSchema, and standard annotations; dropping them at the Hub boundary
+                // makes the aggregated registry less informative than the source registry.
                 registry.register(McpToolDef(
                     info = ToolInfo(
                         name = namespacedName,
                         description = "[${app.namespace}] ${tool.description}",
-                        inputSchema = tool.inputSchema
+                        inputSchema = tool.inputSchema,
+                        title = tool.title,
+                        outputSchema = tool.outputSchema,
+                        annotations = tool.annotations,
                     ),
                     handler = proxyHandler
                 ))
