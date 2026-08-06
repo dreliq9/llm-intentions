@@ -33,17 +33,28 @@ class McpDispatcher(
         }
 
         return try {
+            val requestedVersion = requestProtocolVersion(request)
+            if (requestedVersion != null && requestedVersion !in SUPPORTED_MCP_PROTOCOL_VERSIONS) {
+                throw UnsupportedProtocolVersionError(requestedVersion)
+            }
+
+            val modern = isModernRequest(request)
+            if (modern) validateModernRequestMeta(request)
+
             val rawResult = when (request.method) {
                 "server/discover" -> handleDiscover()
-                "initialize" -> handleInitialize()
+                "initialize" -> {
+                    if (modern) throw MethodNotFoundError("initialize")
+                    handleInitialize()
+                }
                 "ping" -> handlePing()
                 "tools/list" -> handleToolsList()
-                "tools/call" -> handleToolsCall(request)
+                "tools/call" -> handleToolsCall(request, modern)
                 "resources/list" -> handleResourcesList()
-                "resources/read" -> handleResourcesRead(request)
+                "resources/read" -> handleResourcesRead(request, modern)
                 else -> throw MethodNotFoundError(request.method)
             }
-            val result = if (isModernRequest(request)) stampServerInfo(rawResult) else rawResult
+            val result = if (modern) normalizeModernResult(rawResult) else rawResult
             JsonRpcResponse(id = request.id, result = result)
         } catch (e: McpError) {
             JsonRpcResponse(
@@ -109,16 +120,14 @@ class McpDispatcher(
         return json.encodeToJsonElement(result)
     }
 
-    private suspend fun handleToolsCall(request: JsonRpcRequest): JsonElement {
+    private suspend fun handleToolsCall(request: JsonRpcRequest, modern: Boolean): JsonElement {
         val params = request.params
             ?: throw InvalidParamsError("Missing params for tools/call")
         val callParams = json.decodeFromJsonElement<ToolCallParams>(params)
 
         val tool = toolRegistry.get(callParams.name)
         if (tool == null) {
-            if (isModernRequest(request)) {
-                throw InvalidParamsError("Tool not found: ${callParams.name}")
-            }
+            if (modern) throw InvalidParamsError("Unknown tool: ${callParams.name}")
             throw MethodNotFoundError("Tool not found: ${callParams.name}")
         }
 
@@ -135,21 +144,51 @@ class McpDispatcher(
         return json.encodeToJsonElement(result)
     }
 
-    private suspend fun handleResourcesRead(request: JsonRpcRequest): JsonElement {
+    private suspend fun handleResourcesRead(request: JsonRpcRequest, modern: Boolean): JsonElement {
         val params = request.params
             ?: throw InvalidParamsError("Missing params for resources/read")
         val readParams = json.decodeFromJsonElement<ReadResourceParams>(params)
 
         val resource = resourceRegistry.get(readParams.uri)
         if (resource == null) {
-            if (isModernRequest(request)) {
-                throw InvalidParamsError("Resource not found: ${readParams.uri}")
-            }
+            if (modern) throw InvalidParamsError("Resource not found: ${readParams.uri}")
             throw ResourceNotFoundError(readParams.uri)
         }
 
         val result = resource.handler(readParams.uri)
         return json.encodeToJsonElement(result)
+    }
+
+    private fun validateModernRequestMeta(request: JsonRpcRequest) {
+        val meta = request.params?.get("_meta") as? JsonObject
+            ?: throw InvalidParamsError("Modern MCP requests require params._meta")
+
+        val version = meta["io.modelcontextprotocol/protocolVersion"]
+            ?.jsonPrimitive
+            ?.contentOrNull
+            ?: throw InvalidParamsError(
+                "Missing params._meta.io.modelcontextprotocol/protocolVersion"
+            )
+        if (version != MCP_MODERN_PROTOCOL_VERSION) {
+            if (version !in SUPPORTED_MCP_PROTOCOL_VERSIONS) {
+                throw UnsupportedProtocolVersionError(version)
+            }
+            throw InvalidParamsError("Per-request metadata does not select the modern MCP protocol")
+        }
+
+        val clientCapabilities = meta["io.modelcontextprotocol/clientCapabilities"]
+        if (clientCapabilities !is JsonObject) {
+            throw InvalidParamsError(
+                "Missing or invalid params._meta.io.modelcontextprotocol/clientCapabilities"
+            )
+        }
+
+        val clientInfo = meta["io.modelcontextprotocol/clientInfo"]
+        if (clientInfo != null && clientInfo !is JsonObject) {
+            throw InvalidParamsError(
+                "params._meta.io.modelcontextprotocol/clientInfo must be an object when provided"
+            )
+        }
     }
 
     private fun isModernRequest(request: JsonRpcRequest): Boolean =
@@ -167,11 +206,18 @@ class McpDispatcher(
         put("io.modelcontextprotocol/serverInfo", json.encodeToJsonElement(serverInfo))
     }
 
-    private fun stampServerInfo(result: JsonElement): JsonElement {
+    /**
+     * Every modern successful result requires resultType. Server identity is repeated
+     * in _meta so requests remain self-describing without relying on discovery state.
+     */
+    private fun normalizeModernResult(result: JsonElement): JsonElement {
         val obj = result as? JsonObject ?: return result
         val existingMeta = obj["_meta"] as? JsonObject ?: JsonObject(emptyMap())
         val mergedMeta = JsonObject(existingMeta + serverInfoMeta())
-        return JsonObject(obj + ("_meta" to mergedMeta))
+        val withResultType = if ("resultType" in obj) obj else {
+            JsonObject(obj + ("resultType" to JsonPrimitive(MCP_RESULT_COMPLETE)))
+        }
+        return JsonObject(withResultType + ("_meta" to mergedMeta))
     }
 }
 
@@ -188,6 +234,15 @@ class MethodNotFoundError(method: String) :
 
 class InvalidParamsError(message: String) :
     McpError(JsonRpcError.INVALID_PARAMS, message)
+
+class UnsupportedProtocolVersionError(version: String) : McpError(
+    JsonRpcError.UNSUPPORTED_PROTOCOL_VERSION,
+    "Unsupported protocol version: $version",
+    buildJsonObject {
+        put("supported", JsonArray(SUPPORTED_MCP_PROTOCOL_VERSIONS.map(::JsonPrimitive)))
+        put("requested", version)
+    },
+)
 
 class ResourceNotFoundError(uri: String) :
     McpError(-32002, "Resource not found: $uri")
