@@ -3,13 +3,19 @@ package com.androidmcp.core.protocol
 import kotlinx.serialization.*
 import kotlinx.serialization.json.*
 
+/**
+ * Historical public constant retained for source compatibility with deployed code.
+ * initialize-era clients use this version.
+ */
+const val MCP_PROTOCOL_VERSION = "2025-06-18"
+
 /** Current stateless MCP protocol version. */
-const val MCP_PROTOCOL_VERSION = "2026-07-28"
+const val MCP_MODERN_PROTOCOL_VERSION = "2026-07-28"
 
-/** Legacy version retained while deployed clients migrate. */
-const val MCP_LEGACY_PROTOCOL_VERSION = "2025-06-18"
+/** Explicit alias for code that wants to name the compatibility era. */
+const val MCP_LEGACY_PROTOCOL_VERSION = MCP_PROTOCOL_VERSION
 
-val SUPPORTED_MCP_PROTOCOL_VERSIONS = listOf(MCP_PROTOCOL_VERSION, MCP_LEGACY_PROTOCOL_VERSION)
+val SUPPORTED_MCP_PROTOCOL_VERSIONS = listOf(MCP_MODERN_PROTOCOL_VERSION, MCP_LEGACY_PROTOCOL_VERSION)
 
 const val MCP_RESULT_COMPLETE = "complete"
 const val MCP_CACHE_SCOPE_PRIVATE = "private"
