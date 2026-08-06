@@ -44,9 +44,15 @@ object McpHttpRequestValidator {
             ?.jsonPrimitive
             ?.contentOrNull
 
+        // Header-based routing was introduced by the modern protocol. Treat a request as
+        // a modern attempt when it selects the modern version, invokes server/discover,
+        // carries required modern capability metadata, or sends Mcp-Method. This also
+        // lets an unknown future version receive -32022 instead of falling into legacy.
         val modern = headerVersion == MCP_MODERN_PROTOCOL_VERSION ||
             bodyVersion == MCP_MODERN_PROTOCOL_VERSION ||
-            request.method == "server/discover"
+            request.method == "server/discover" ||
+            headers.containsKey(HEADER_METHOD) ||
+            meta?.containsKey(META_CLIENT_CAPABILITIES) == true
 
         if (!modern) {
             // Keep the deployed initialize-era path permissive. Once compatibility mode
