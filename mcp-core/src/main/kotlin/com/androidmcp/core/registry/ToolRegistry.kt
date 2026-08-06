@@ -33,7 +33,8 @@ class ToolRegistry {
 
     fun get(name: String): McpToolDef? = tools[name]
 
-    fun list(): List<ToolInfo> = tools.values.map { it.info }
+    /** Stable ordering improves MCP list caching and upstream LLM prompt-cache reuse. */
+    fun list(): List<ToolInfo> = tools.values.map { it.info }.sortedBy { it.name }
 
     fun size(): Int = tools.size
 }
@@ -99,6 +100,11 @@ fun jsonSchema(block: JsonSchemaBuilder.() -> Unit): JsonObject {
     return JsonSchemaBuilder().apply(block).build()
 }
 
+private fun ToolMetadata.toMcpAnnotations(): ToolAnnotations = ToolAnnotations(
+    destructiveHint = destructive,
+    idempotentHint = idempotent,
+)
+
 /**
  * Register a tool whose handler returns a raw String. The string is wrapped in an
  * OK envelope and rendered as MCP text content. On uncaught exception, the framework
@@ -112,7 +118,12 @@ fun ToolRegistry.textTool(
     handler: suspend (JsonObject) -> String,
 ) {
     register(McpToolDef(
-        info = ToolInfo(name = name, description = description, inputSchema = params),
+        info = ToolInfo(
+            name = name,
+            description = description,
+            inputSchema = params,
+            annotations = metadata?.toMcpAnnotations(),
+        ),
         metadata = metadata,
         handler = { args ->
             val text = handler(args)
@@ -140,7 +151,12 @@ fun ToolRegistry.envelopeTool(
     handler: suspend (JsonObject) -> Envelope,
 ) {
     register(McpToolDef(
-        info = ToolInfo(name = name, description = description, inputSchema = params),
+        info = ToolInfo(
+            name = name,
+            description = description,
+            inputSchema = params,
+            annotations = metadata?.toMcpAnnotations(),
+        ),
         metadata = metadata,
         handler = { args ->
             val env = handler(args)
