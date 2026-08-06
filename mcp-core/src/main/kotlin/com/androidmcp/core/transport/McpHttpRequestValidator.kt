@@ -95,7 +95,7 @@ object McpHttpRequestValidator {
                     message = "Unsupported protocol version: $bodyVersion",
                     data = buildJsonObject {
                         put("supported", JsonArray(SUPPORTED_MCP_PROTOCOL_VERSIONS.map(::JsonPrimitive)))
-                        put("requested", bodyVersion)
+                        put("requested", JsonPrimitive(bodyVersion))
                     },
                 ),
             )
