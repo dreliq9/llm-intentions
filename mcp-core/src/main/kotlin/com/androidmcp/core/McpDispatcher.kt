@@ -8,11 +8,11 @@ import kotlinx.serialization.json.*
 /**
  * Handles incoming MCP JSON-RPC requests and dispatches to the appropriate handler.
  *
- * Supports protocol version 2025-06-18: tools, resources, structured tool outputs.
- * Prompts, sampling, completion, and elicitation are not yet implemented.
+ * The dispatcher supports the stateless MCP 2026-07-28 core while retaining the
+ * 2025-06-18 initialize path for deployed clients during migration.
  */
 class McpDispatcher(
-    private val serverInfo: Implementation = Implementation("android-mcp-sdk", "0.1.0"),
+    private val serverInfo: Implementation = Implementation("android-mcp-sdk", "0.2.0"),
     private val toolRegistry: ToolRegistry = ToolRegistry(),
     private val resourceRegistry: ResourceRegistry = ResourceRegistry(),
     @Volatile var instructions: String? = null
@@ -24,17 +24,17 @@ class McpDispatcher(
 
     /**
      * Process a JSON-RPC request and return a response.
-     * Returns null for notifications (no id).
+     * Returns null for legacy notifications (no id).
      */
     suspend fun dispatch(request: JsonRpcRequest): JsonRpcResponse? {
-        // Notifications have no id and expect no response
         if (request.id == null) {
             handleNotification(request)
             return null
         }
 
         return try {
-            val result = when (request.method) {
+            val rawResult = when (request.method) {
+                "server/discover" -> handleDiscover()
                 "initialize" -> handleInitialize(request)
                 "ping" -> handlePing()
                 "tools/list" -> handleToolsList()
@@ -43,11 +43,12 @@ class McpDispatcher(
                 "resources/read" -> handleResourcesRead(request)
                 else -> throw MethodNotFoundError(request.method)
             }
+            val result = if (isModernRequest(request)) stampServerInfo(rawResult) else rawResult
             JsonRpcResponse(id = request.id, result = result)
         } catch (e: McpError) {
             JsonRpcResponse(
                 id = request.id,
-                error = JsonRpcError(code = e.code, message = e.message ?: "Unknown error")
+                error = JsonRpcError(code = e.code, message = e.message ?: "Unknown error", data = e.data)
             )
         } catch (e: Exception) {
             JsonRpcResponse(
@@ -61,31 +62,60 @@ class McpDispatcher(
     }
 
     private fun handleNotification(request: JsonRpcRequest) {
+        // Retained only for compatibility with initialize-era clients.
         when (request.method) {
             "notifications/initialized" -> { /* client confirmed init */ }
-            "notifications/cancelled" -> { /* client cancelled a request */ }
+            "notifications/cancelled" -> { /* legacy client cancelled a request */ }
         }
     }
 
+    private fun capabilities(): ServerCapabilities = ServerCapabilities(
+        tools = if (toolRegistry.size() > 0) ToolsCapability() else null,
+        resources = if (resourceRegistry.size() > 0) ResourcesCapability() else null
+    )
+
+    private fun handleDiscover(): JsonElement {
+        val result = DiscoverResult(
+            supportedVersions = SUPPORTED_MCP_PROTOCOL_VERSIONS,
+            capabilities = capabilities(),
+            meta = serverInfoMeta(),
+            instructions = instructions,
+            ttlMs = 60_000,
+            cacheScope = MCP_CACHE_SCOPE_PRIVATE,
+        )
+        return json.encodeToJsonElement(result)
+    }
+
     private fun handleInitialize(request: JsonRpcRequest): JsonElement {
+        // initialize belongs to the legacy protocol era. Keep it stable for deployed
+        // clients while modern clients use server/discover and per-request metadata.
+        val requested = request.params
+            ?.get("protocolVersion")
+            ?.jsonPrimitive
+            ?.contentOrNull
+        val selected = if (requested == MCP_LEGACY_PROTOCOL_VERSION) {
+            MCP_LEGACY_PROTOCOL_VERSION
+        } else {
+            MCP_LEGACY_PROTOCOL_VERSION
+        }
+
         val result = InitializeResult(
-            protocolVersion = MCP_PROTOCOL_VERSION,
-            capabilities = ServerCapabilities(
-                tools = if (toolRegistry.size() > 0) ToolsCapability() else null,
-                resources = if (resourceRegistry.size() > 0) ResourcesCapability() else null
-            ),
+            protocolVersion = selected,
+            capabilities = capabilities(),
             serverInfo = serverInfo,
             instructions = instructions
         )
         return json.encodeToJsonElement(result)
     }
 
-    private fun handlePing(): JsonElement {
-        return buildJsonObject { }
-    }
+    private fun handlePing(): JsonElement = buildJsonObject { }
 
     private fun handleToolsList(): JsonElement {
-        val result = ToolsListResult(tools = toolRegistry.list())
+        val result = ToolsListResult(
+            tools = toolRegistry.list(),
+            ttlMs = 30_000,
+            cacheScope = MCP_CACHE_SCOPE_PRIVATE,
+        )
         return json.encodeToJsonElement(result)
     }
 
@@ -102,7 +132,11 @@ class McpDispatcher(
     }
 
     private fun handleResourcesList(): JsonElement {
-        val result = ResourcesListResult(resources = resourceRegistry.list())
+        val result = ResourcesListResult(
+            resources = resourceRegistry.list(),
+            ttlMs = 30_000,
+            cacheScope = MCP_CACHE_SCOPE_PRIVATE,
+        )
         return json.encodeToJsonElement(result)
     }
 
@@ -112,16 +146,47 @@ class McpDispatcher(
         val readParams = json.decodeFromJsonElement<ReadResourceParams>(params)
 
         val resource = resourceRegistry.get(readParams.uri)
-            ?: throw ResourceNotFoundError(readParams.uri)
+        if (resource == null) {
+            if (isModernRequest(request)) {
+                throw InvalidParamsError("Resource not found: ${readParams.uri}")
+            }
+            throw ResourceNotFoundError(readParams.uri)
+        }
 
         val result = resource.handler(readParams.uri)
         return json.encodeToJsonElement(result)
+    }
+
+    private fun isModernRequest(request: JsonRpcRequest): Boolean =
+        requestProtocolVersion(request) == MCP_PROTOCOL_VERSION || request.method == "server/discover"
+
+    private fun requestProtocolVersion(request: JsonRpcRequest): String? =
+        request.params
+            ?.get("_meta")
+            ?.let { it as? JsonObject }
+            ?.get("io.modelcontextprotocol/protocolVersion")
+            ?.jsonPrimitive
+            ?.contentOrNull
+
+    private fun serverInfoMeta(): JsonObject = buildJsonObject {
+        put("io.modelcontextprotocol/serverInfo", json.encodeToJsonElement(serverInfo))
+    }
+
+    private fun stampServerInfo(result: JsonElement): JsonElement {
+        val obj = result as? JsonObject ?: return result
+        val existingMeta = obj["_meta"] as? JsonObject ?: JsonObject(emptyMap())
+        val mergedMeta = JsonObject(existingMeta + serverInfoMeta())
+        return JsonObject(obj + ("_meta" to mergedMeta))
     }
 }
 
 // --- Error types ---
 
-open class McpError(val code: Int, message: String) : Exception(message)
+open class McpError(
+    val code: Int,
+    message: String,
+    val data: JsonElement? = null,
+) : Exception(message)
 
 class MethodNotFoundError(method: String) :
     McpError(JsonRpcError.METHOD_NOT_FOUND, "Method not found: $method")
@@ -129,9 +194,5 @@ class MethodNotFoundError(method: String) :
 class InvalidParamsError(message: String) :
     McpError(JsonRpcError.INVALID_PARAMS, message)
 
-/**
- * Spec 2025-06-18 defines code -32002 for resource-not-found responses.
- * Falls in the JSON-RPC server-defined error range (-32000 to -32099).
- */
 class ResourceNotFoundError(uri: String) :
     McpError(-32002, "Resource not found: $uri")
