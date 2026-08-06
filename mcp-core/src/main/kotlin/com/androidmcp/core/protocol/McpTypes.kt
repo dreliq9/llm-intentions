@@ -3,10 +3,19 @@ package com.androidmcp.core.protocol
 import kotlinx.serialization.*
 import kotlinx.serialization.json.*
 
-/** MCP protocol version */
-const val MCP_PROTOCOL_VERSION = "2025-06-18"
+/** Current stateless MCP protocol version. */
+const val MCP_PROTOCOL_VERSION = "2026-07-28"
 
-// --- Initialize ---
+/** Legacy version retained while deployed clients migrate. */
+const val MCP_LEGACY_PROTOCOL_VERSION = "2025-06-18"
+
+val SUPPORTED_MCP_PROTOCOL_VERSIONS = listOf(MCP_PROTOCOL_VERSION, MCP_LEGACY_PROTOCOL_VERSION)
+
+const val MCP_RESULT_COMPLETE = "complete"
+const val MCP_CACHE_SCOPE_PRIVATE = "private"
+const val MCP_CACHE_SCOPE_PUBLIC = "public"
+
+// --- Initialize (legacy compatibility path) ---
 
 @Serializable
 data class InitializeParams(
@@ -28,10 +37,22 @@ data class RootsCapability(
 
 @Serializable
 data class InitializeResult(
-    val protocolVersion: String = MCP_PROTOCOL_VERSION,
+    val protocolVersion: String = MCP_LEGACY_PROTOCOL_VERSION,
     val capabilities: ServerCapabilities = ServerCapabilities(),
     val serverInfo: Implementation = Implementation("android-mcp-sdk", "0.1.0"),
     val instructions: String? = null
+)
+
+/** 2026-07-28 stateless discovery result. */
+@Serializable
+data class DiscoverResult(
+    val resultType: String = MCP_RESULT_COMPLETE,
+    val supportedVersions: List<String> = SUPPORTED_MCP_PROTOCOL_VERSIONS,
+    val capabilities: ServerCapabilities = ServerCapabilities(),
+    @SerialName("_meta") val meta: JsonObject = JsonObject(emptyMap()),
+    val instructions: String? = null,
+    val ttlMs: Long = 60_000,
+    val cacheScope: String = MCP_CACHE_SCOPE_PRIVATE,
 )
 
 @Serializable
@@ -67,7 +88,7 @@ data class Implementation(
 
 /**
  * Tool annotations describing behavior to clients (advisory; clients should
- * not rely on these for security-critical decisions). Spec 2025-06-18.
+ * not rely on these for security-critical decisions).
  */
 @Serializable
 data class ToolAnnotations(
@@ -90,14 +111,19 @@ data class ToolInfo(
 
 @Serializable
 data class ToolsListResult(
+    val resultType: String = MCP_RESULT_COMPLETE,
     val tools: List<ToolInfo>,
-    val nextCursor: String? = null
+    val nextCursor: String? = null,
+    val ttlMs: Long = 30_000,
+    val cacheScope: String = MCP_CACHE_SCOPE_PRIVATE,
 )
 
 @Serializable
 data class ToolCallParams(
     val name: String,
-    val arguments: JsonObject? = null
+    val arguments: JsonObject? = null,
+    val inputResponses: JsonObject? = null,
+    val requestState: String? = null,
 )
 
 /**
@@ -105,12 +131,13 @@ data class ToolCallParams(
  *
  * - [content]: human-readable text/image/resource blocks (always present).
  * - [structuredContent]: typed JSON shape for clients that understand the
- *   tool's outputSchema. Optional. Spec 2025-06-18.
+ *   tool's outputSchema. Optional.
  * - [isError]: true if the tool failed; clients should surface this rather
  *   than treating the response as success.
  */
 @Serializable
 data class ToolCallResult(
+    val resultType: String = MCP_RESULT_COMPLETE,
     val content: List<ContentBlock>,
     val structuredContent: JsonObject? = null,
     val isError: Boolean = false
@@ -126,15 +153,11 @@ data class ContentBlock(
     }
 }
 
-// --- Resources (spec 2025-06-18) ---
+// --- Resources ---
 
 /**
  * A discoverable resource the server exposes for clients to read.
- *
- * Resources are content the LLM can pull on demand without making a tool
- * call — appropriate for things that are "state to read" rather than
- * "actions to take". Examples: a notification thread, a calendar event,
- * a recent files listing.
+ * Resources are state to read rather than actions to take.
  */
 @Serializable
 data class Resource(
@@ -155,8 +178,11 @@ data class ResourceAnnotations(
 
 @Serializable
 data class ResourcesListResult(
+    val resultType: String = MCP_RESULT_COMPLETE,
     val resources: List<Resource>,
-    val nextCursor: String? = null
+    val nextCursor: String? = null,
+    val ttlMs: Long = 30_000,
+    val cacheScope: String = MCP_CACHE_SCOPE_PRIVATE,
 )
 
 @Serializable
@@ -166,7 +192,10 @@ data class ReadResourceParams(
 
 @Serializable
 data class ReadResourceResult(
-    val contents: List<ResourceContents>
+    val resultType: String = MCP_RESULT_COMPLETE,
+    val contents: List<ResourceContents>,
+    val ttlMs: Long = 0,
+    val cacheScope: String = MCP_CACHE_SCOPE_PRIVATE,
 )
 
 /**
