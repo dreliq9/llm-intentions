@@ -136,8 +136,7 @@ data class ToolCallParams(
  * Tool result payload.
  *
  * - [content]: human-readable text/image/resource blocks (always present).
- * - [structuredContent]: typed JSON shape for clients that understand the
- *   tool's outputSchema. Optional.
+ * - [structuredContent]: arbitrary JSON that conforms to outputSchema when present.
  * - [isError]: true if the tool failed; clients should surface this rather
  *   than treating the response as success.
  */
@@ -145,7 +144,7 @@ data class ToolCallParams(
 data class ToolCallResult(
     val resultType: String = MCP_RESULT_COMPLETE,
     val content: List<ContentBlock>,
-    val structuredContent: JsonObject? = null,
+    val structuredContent: JsonElement? = null,
     val isError: Boolean = false
 )
 
