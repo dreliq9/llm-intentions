@@ -100,7 +100,16 @@ fun jsonSchema(block: JsonSchemaBuilder.() -> Unit): JsonObject {
     return JsonSchemaBuilder().apply(block).build()
 }
 
+/**
+ * The existing LLM Intentions metadata predates MCP ToolAnnotations and uses
+ * `destructive` as the project's confirmation/side-effect flag: false for reads,
+ * true for operations that mutate device/user state. Preserve that meaning during
+ * migration by explicitly publishing readOnlyHint as its inverse. Marking every
+ * current write as destructive is intentionally conservative until Descriptor v1
+ * separates mutating/additive/destructive semantics.
+ */
 private fun ToolMetadata.toMcpAnnotations(): ToolAnnotations = ToolAnnotations(
+    readOnlyHint = !destructive,
     destructiveHint = destructive,
     idempotentHint = idempotent,
 )
