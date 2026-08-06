@@ -11,8 +11,7 @@ import android.util.Log
 import com.androidmcp.core.protocol.JsonRpcError
 import com.androidmcp.core.protocol.JsonRpcRequest
 import com.androidmcp.core.protocol.JsonRpcResponse
-import com.androidmcp.core.protocol.MCP_LEGACY_PROTOCOL_VERSION
-import com.androidmcp.core.protocol.MCP_PROTOCOL_VERSION
+import com.androidmcp.core.protocol.MCP_MODERN_PROTOCOL_VERSION
 import com.androidmcp.core.protocol.SUPPORTED_MCP_PROTOCOL_VERSIONS
 import com.androidmcp.hub.HubMcpEngine
 import kotlinx.coroutines.CoroutineScope
@@ -320,7 +319,7 @@ private class McpRawHttpServer(
             }
         } catch (e: Exception) {
             Log.e("LLM-Http", "Error processing request", e)
-            val modern = headers["mcp-protocol-version"] == MCP_PROTOCOL_VERSION
+            val modern = headers["mcp-protocol-version"] == MCP_MODERN_PROTOCOL_VERSION
             val error = JsonRpcResponse(
                 error = JsonRpcError(
                     code = JsonRpcError.PARSE_ERROR,
@@ -351,7 +350,8 @@ private class McpRawHttpServer(
             )
         }
 
-        val modern = headerVersion == MCP_PROTOCOL_VERSION || bodyVersion == MCP_PROTOCOL_VERSION ||
+        val modern = headerVersion == MCP_MODERN_PROTOCOL_VERSION ||
+            bodyVersion == MCP_MODERN_PROTOCOL_VERSION ||
             request.method == "server/discover"
 
         if (!modern) {
@@ -359,7 +359,7 @@ private class McpRawHttpServer(
             return RequestValidation(modern = false)
         }
 
-        if (headerVersion != MCP_PROTOCOL_VERSION || bodyVersion != MCP_PROTOCOL_VERSION) {
+        if (headerVersion != MCP_MODERN_PROTOCOL_VERSION || bodyVersion != MCP_MODERN_PROTOCOL_VERSION) {
             return RequestValidation(
                 modern = true,
                 errorResponse = headerMismatch(
@@ -411,7 +411,7 @@ private class McpRawHttpServer(
                 message = "Unsupported MCP protocol version: $requested",
                 data = buildJsonObject {
                     put("supported", kotlinx.serialization.json.JsonArray(
-                        SUPPORTED_MCP_PROTOCOL_VERSIONS.map(::JsonPrimitive)
+                        SUPPORTED_MCP_PROTOCOL_VERSIONS.map { JsonPrimitive(it) }
                     ))
                     put("requested", requested)
                 },
