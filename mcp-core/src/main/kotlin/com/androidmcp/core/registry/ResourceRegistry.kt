@@ -42,7 +42,8 @@ class ResourceRegistry {
 
     fun get(uri: String): McpResourceDef? = resources[uri]
 
-    fun list(): List<Resource> = resources.values.map { it.info }
+    /** Stable ordering is required for predictable cache and prompt behavior. */
+    fun list(): List<Resource> = resources.values.map { it.info }.sortedBy { it.uri }
 
     fun size(): Int = resources.size
 }
