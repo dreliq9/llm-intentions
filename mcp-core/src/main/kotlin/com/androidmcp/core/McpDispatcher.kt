@@ -35,7 +35,7 @@ class McpDispatcher(
         return try {
             val rawResult = when (request.method) {
                 "server/discover" -> handleDiscover()
-                "initialize" -> handleInitialize(request)
+                "initialize" -> handleInitialize()
                 "ping" -> handlePing()
                 "tools/list" -> handleToolsList()
                 "tools/call" -> handleToolsCall(request)
@@ -86,21 +86,11 @@ class McpDispatcher(
         return json.encodeToJsonElement(result)
     }
 
-    private fun handleInitialize(request: JsonRpcRequest): JsonElement {
-        // initialize belongs to the legacy protocol era. Keep it stable for deployed
-        // clients while modern clients use server/discover and per-request metadata.
-        val requested = request.params
-            ?.get("protocolVersion")
-            ?.jsonPrimitive
-            ?.contentOrNull
-        val selected = if (requested == MCP_LEGACY_PROTOCOL_VERSION) {
-            MCP_LEGACY_PROTOCOL_VERSION
-        } else {
-            MCP_LEGACY_PROTOCOL_VERSION
-        }
-
+    private fun handleInitialize(): JsonElement {
+        // initialize belongs to the legacy protocol era. Keep its public version stable
+        // while modern clients use server/discover and per-request metadata.
         val result = InitializeResult(
-            protocolVersion = selected,
+            protocolVersion = MCP_LEGACY_PROTOCOL_VERSION,
             capabilities = capabilities(),
             serverInfo = serverInfo,
             instructions = instructions
@@ -125,7 +115,12 @@ class McpDispatcher(
         val callParams = json.decodeFromJsonElement<ToolCallParams>(params)
 
         val tool = toolRegistry.get(callParams.name)
-            ?: throw MethodNotFoundError("Tool not found: ${callParams.name}")
+        if (tool == null) {
+            if (isModernRequest(request)) {
+                throw InvalidParamsError("Tool not found: ${callParams.name}")
+            }
+            throw MethodNotFoundError("Tool not found: ${callParams.name}")
+        }
 
         val result = tool.handler(callParams.arguments ?: buildJsonObject { })
         return json.encodeToJsonElement(result)
@@ -158,7 +153,7 @@ class McpDispatcher(
     }
 
     private fun isModernRequest(request: JsonRpcRequest): Boolean =
-        requestProtocolVersion(request) == MCP_PROTOCOL_VERSION || request.method == "server/discover"
+        requestProtocolVersion(request) == MCP_MODERN_PROTOCOL_VERSION || request.method == "server/discover"
 
     private fun requestProtocolVersion(request: JsonRpcRequest): String? =
         request.params
