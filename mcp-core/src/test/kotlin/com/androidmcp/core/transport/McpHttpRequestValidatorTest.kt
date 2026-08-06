@@ -20,12 +20,15 @@ class McpHttpRequestValidatorTest {
     ): JsonRpcRequest = JsonRpcRequest(
         method = method,
         params = buildJsonObject {
-            if (name != null) put("name", name)
+            if (name != null) put("name", JsonPrimitive(name))
             put("_meta", buildJsonObject {
-                put("io.modelcontextprotocol/protocolVersion", MCP_MODERN_PROTOCOL_VERSION)
+                put(
+                    "io.modelcontextprotocol/protocolVersion",
+                    JsonPrimitive(MCP_MODERN_PROTOCOL_VERSION),
+                )
                 put("io.modelcontextprotocol/clientInfo", buildJsonObject {
-                    put("name", "test-client")
-                    put("version", "1.0.0")
+                    put("name", JsonPrimitive("test-client"))
+                    put("version", JsonPrimitive("1.0.0"))
                 })
                 if (includeCapabilities) {
                     put("io.modelcontextprotocol/clientCapabilities", buildJsonObject { })
