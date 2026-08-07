@@ -71,7 +71,7 @@ class IntentToolRouter(private val context: Context) {
         component: ComponentName,
         originalToolName: String,
     ): suspend (JsonObject) -> ToolCallResult {
-        return { args ->
+        return handler@{ args ->
             val requestId = UUID.randomUUID().toString()
             val serviceDeferred = CompletableDeferred<ICapAppService>()
             val resultDeferred = CompletableDeferred<ToolCallResult>()
@@ -115,7 +115,7 @@ class IntentToolRouter(private val context: Context) {
                     this.component = component
                 }
                 if (!context.bindService(bindIntent, connection, Context.BIND_AUTO_CREATE)) {
-                    return@return ToolCallResult(
+                    return@handler ToolCallResult(
                         content = listOf(ContentBlock.text("Unable to bind CapApp: ${component.packageName}")),
                         isError = true,
                     )
