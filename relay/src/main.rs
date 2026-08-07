@@ -3,9 +3,9 @@ mod session;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        Path as AxumPath, State, WebSocketUpgrade,
+        DefaultBodyLimit, Path as AxumPath, State, WebSocketUpgrade,
     },
-    http::StatusCode,
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -14,22 +14,42 @@ use futures_util::{SinkExt, StreamExt};
 use intentions_relay::{
     ensure_text_frame_bound, now_ms, relay_state_path_from_env, verify_device_auth, AuthChallenge,
     ClientFrame, EnrollmentRequest, EnrollmentResponse, EnrollmentStore, RelayError, ServerFrame,
-    DEFAULT_AUTH_CHALLENGE_TTL_MS, DEFAULT_ENROLLMENT_TTL_MS,
+    DEFAULT_AUTH_CHALLENGE_TTL_MS, DEFAULT_ENROLLMENT_TTL_MS, MAX_TEXT_FRAME_BYTES,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use session::{DispatchFailure, LiveSessionRouter, SESSION_OUTBOUND_CAPACITY};
+use sha2::{Digest, Sha256};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tokio::{sync::mpsc, time::{interval, timeout}};
+use subtle::ConstantTimeEq;
+use tokio::{
+    sync::mpsc,
+    time::{interval, timeout},
+};
+
+const MCP_MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+const MAX_TEST_TIMEOUT_MS: u64 = 30_000;
+const MAX_TEST_PRINCIPAL_CHARS: usize = 256;
+const ALLOWED_TEST_TOOLS: [&str; 2] = ["hub.relay_echo", "hub.relay_confirm_echo"];
 
 #[derive(Clone)]
 struct AppState {
     enrollments: Arc<EnrollmentStore>,
     sessions: Arc<LiveSessionRouter>,
+    admin_token_digest: Option<[u8; 32]>,
 }
 
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TestDispatchRequest {
+    principal_id: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    request: Value,
 }
 
 #[tokio::main]
@@ -126,8 +146,10 @@ fn print_usage() {
            intentions-relay revoke <device-id>\n\
            intentions-relay serve <loopback-address>\n\n\
          Environment:\n\
-           INTENTIONS_RELAY_STATE   path to app state JSON\n\n\
-         Public deployment must terminate TLS in front of the loopback listener."
+           INTENTIONS_RELAY_STATE       path to app state JSON\n\
+           INTENTIONS_RELAY_ADMIN_TOKEN enables loopback synthetic test dispatch\n\n\
+         Public deployment must terminate TLS in front of the loopback listener.\n\
+         Do not proxy the admin test-dispatch route to untrusted networks."
     );
 }
 
@@ -135,14 +157,28 @@ async fn serve(
     address: SocketAddr,
     enrollments: Arc<EnrollmentStore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let admin_token_digest = admin_token_digest_from_env();
     let state = AppState {
         enrollments,
         sessions: Arc::new(LiveSessionRouter::new()),
+        admin_token_digest,
     };
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/health", get(health))
         .route("/v1/device/enroll", post(enroll_device))
-        .route("/v1/device/connect/{device_id}", get(connect_device))
+        .route("/v1/device/connect/{device_id}", get(connect_device));
+
+    // This is an operator-only harness for H3 end-to-end tests. If no separate admin secret is
+    // configured, the route does not exist at all.
+    if state.admin_token_digest.is_some() {
+        app = app.route(
+            "/v1/admin/test-dispatch/{device_id}",
+            post(test_dispatch),
+        );
+    }
+
+    let app = app
+        .layer(DefaultBodyLimit::max(MAX_TEXT_FRAME_BYTES))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -174,6 +210,147 @@ async fn enroll_device(
     }
 }
 
+async fn test_dispatch(
+    AxumPath(device_id): AxumPath<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TestDispatchRequest>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "admin authentication required".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    if !valid_test_principal(&body.principal_id) || !valid_synthetic_request(&body.request) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorBody {
+                error: "synthetic test dispatch scope rejected".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    if state.enrollments.get_active_device(&device_id).is_none() {
+        return relay_error_response(RelayError::DeviceUnavailable);
+    }
+
+    let timeout_ms = body
+        .timeout_ms
+        .unwrap_or(10_000)
+        .clamp(1, MAX_TEST_TIMEOUT_MS);
+    let deadline_ms = now_ms().saturating_add(timeout_ms);
+    match state
+        .sessions
+        .dispatch(
+            &device_id,
+            body.principal_id,
+            body.request,
+            deadline_ms,
+        )
+        .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(DispatchFailure::Offline) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorBody {
+                error: "device is offline".into(),
+            }),
+        )
+            .into_response(),
+        Err(DispatchFailure::Busy) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorBody {
+                error: "device relay is busy".into(),
+            }),
+        )
+            .into_response(),
+        Err(DispatchFailure::SessionReplaced) => (
+            StatusCode::CONFLICT,
+            Json(ErrorBody {
+                error: "device session was replaced".into(),
+            }),
+        )
+            .into_response(),
+        Err(DispatchFailure::Deadline) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(ErrorBody {
+                error: "device dispatch deadline expired".into(),
+            }),
+        )
+            .into_response(),
+        Err(DispatchFailure::DeviceError(code, message)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorBody {
+                error: format!("device error {code}: {message}"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+fn valid_test_principal(principal_id: &str) -> bool {
+    principal_id.starts_with("test:")
+        && principal_id.len() <= MAX_TEST_PRINCIPAL_CHARS
+        && principal_id.len() > "test:".len()
+}
+
+fn valid_synthetic_request(request: &Value) -> bool {
+    let Some(object) = request.as_object() else {
+        return false;
+    };
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || object.get("method").and_then(Value::as_str) != Some("tools/call")
+        || object.get("id").is_none_or(Value::is_null)
+    {
+        return false;
+    }
+    let Some(params) = object.get("params").and_then(Value::as_object) else {
+        return false;
+    };
+    let Some(tool_name) = params.get("name").and_then(Value::as_str) else {
+        return false;
+    };
+    if !ALLOWED_TEST_TOOLS.contains(&tool_name) {
+        return false;
+    }
+    params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(Value::as_str)
+        == Some(MCP_MODERN_PROTOCOL_VERSION)
+}
+
+fn admin_token_digest_from_env() -> Option<[u8; 32]> {
+    let token = std::env::var("INTENTIONS_RELAY_ADMIN_TOKEN").ok()?;
+    let trimmed = token.trim();
+    if trimmed.len() < 24 || trimmed.len() > 512 {
+        eprintln!("INTENTIONS_RELAY_ADMIN_TOKEN ignored: expected 24..512 characters");
+        return None;
+    }
+    Some(Sha256::digest(trimmed.as_bytes()).into())
+}
+
+fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(expected) = state.admin_token_digest else {
+        return false;
+    };
+    let Some(value) = headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    let Some(token) = value.strip_prefix("Bearer ") else {
+        return false;
+    };
+    let supplied: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    bool::from(expected.ct_eq(&supplied))
+}
+
 async fn connect_device(
     AxumPath(device_id): AxumPath<String>,
     ws: WebSocketUpgrade,
@@ -183,7 +360,7 @@ async fn connect_device(
         return relay_error_response(RelayError::DeviceUnavailable);
     }
 
-    ws.max_message_size(intentions_relay::MAX_TEXT_FRAME_BYTES)
+    ws.max_message_size(MAX_TEXT_FRAME_BYTES)
         .on_upgrade(move |socket| handle_device_socket(socket, device_id, state))
 }
 
@@ -272,9 +449,7 @@ async fn handle_device_socket(mut socket: WebSocket, device_id: String, state: A
                 break;
             }
             if close_after {
-                let _ = ws_sender
-                    .send(Message::Close(None))
-                    .await;
+                let _ = ws_sender.send(Message::Close(None)).await;
                 break;
             }
         }
@@ -347,8 +522,46 @@ fn relay_error_response(error: RelayError) -> Response {
         | RelayError::InvalidRequest(_)
         | RelayError::Base64(_) => StatusCode::BAD_REQUEST,
         RelayError::DeviceUnavailable => StatusCode::NOT_FOUND,
-        RelayError::ChallengeExpired | RelayError::ChallengeDeviceMismatch => StatusCode::UNAUTHORIZED,
+        RelayError::ChallengeExpired | RelayError::ChallengeDeviceMismatch => {
+            StatusCode::UNAUTHORIZED
+        }
         RelayError::Io(_) | RelayError::Json(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, Json(ErrorBody { error: error.to_string() })).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn synthetic_scope_rejects_real_tools_and_non_test_principals() {
+        assert!(valid_test_principal("test:relay"));
+        assert!(!valid_test_principal("provider:user"));
+
+        let good = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "hub.relay_echo",
+                "arguments": {"message": "hello"},
+                "_meta": {"io.modelcontextprotocol/protocolVersion": MCP_MODERN_PROTOCOL_VERSION}
+            }
+        });
+        assert!(valid_synthetic_request(&good));
+
+        let real_tool = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "people.contacts_search",
+                "arguments": {},
+                "_meta": {"io.modelcontextprotocol/protocolVersion": MCP_MODERN_PROTOCOL_VERSION}
+            }
+        });
+        assert!(!valid_synthetic_request(&real_tool));
+    }
 }
