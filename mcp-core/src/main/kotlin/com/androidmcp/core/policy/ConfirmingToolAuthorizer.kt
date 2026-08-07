@@ -8,8 +8,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.concurrent.ConcurrentHashMap
@@ -24,13 +22,40 @@ interface PendingConfirmationStore {
     fun consume(nonce: String, nowMs: Long): Boolean
 }
 
-class InMemoryPendingConfirmationStore : PendingConfirmationStore {
+/**
+ * Bounded, in-memory one-time confirmation store.
+ *
+ * Pending confirmations are deliberately ephemeral: a Hub restart invalidates them. The bound
+ * prevents a remote caller from growing memory without limit by repeatedly requesting user
+ * confirmation and never answering. On overflow the soonest-expiring entry is evicted, which is
+ * fail-closed: an evicted confirmation can no longer authorize execution.
+ */
+class InMemoryPendingConfirmationStore(
+    private val maxEntries: Int = DEFAULT_MAX_ENTRIES,
+    private val wallClockMs: () -> Long = System::currentTimeMillis,
+) : PendingConfirmationStore {
     private val pending = ConcurrentHashMap<String, Long>()
 
-    override fun register(nonce: String, expiresAtMs: Long) {
-        pending[nonce] = expiresAtMs
+    init {
+        require(maxEntries > 0) { "maxEntries must be positive" }
     }
 
+    @Synchronized
+    override fun register(nonce: String, expiresAtMs: Long) {
+        val nowMs = wallClockMs()
+        cleanup(nowMs)
+        if (expiresAtMs <= nowMs) return
+
+        pending[nonce] = expiresAtMs
+        while (pending.size > maxEntries) {
+            val victim = pending.entries.minWithOrNull(
+                compareBy<Map.Entry<String, Long>> { it.value }.thenBy { it.key }
+            ) ?: break
+            pending.remove(victim.key, victim.value)
+        }
+    }
+
+    @Synchronized
     override fun consume(nonce: String, nowMs: Long): Boolean {
         cleanup(nowMs)
         val expires = pending.remove(nonce) ?: return false
@@ -39,6 +64,10 @@ class InMemoryPendingConfirmationStore : PendingConfirmationStore {
 
     private fun cleanup(nowMs: Long) {
         pending.entries.removeIf { (_, expiresAt) -> expiresAt <= nowMs }
+    }
+
+    companion object {
+        const val DEFAULT_MAX_ENTRIES = 256
     }
 }
 
