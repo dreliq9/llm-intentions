@@ -1,8 +1,8 @@
 package com.androidmcp.hub.security
 
 import android.content.Context
+import com.androidmcp.core.transport.BearerTokenAuthenticator
 import java.io.File
-import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
 
@@ -22,34 +22,27 @@ object HubAccessTokenStore {
         val existing = if (file.exists()) file.readText(Charsets.UTF_8).trim() else ""
         if (existing.length >= MIN_TOKEN_LENGTH) return@synchronized existing
 
-        val bytes = ByteArray(TOKEN_BYTES)
-        random.nextBytes(bytes)
-        val token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+        val token = newToken()
         file.parentFile?.mkdirs()
         file.writeText(token, Charsets.UTF_8)
         token
     }
 
     fun rotate(context: Context): String = synchronized(lock) {
-        val bytes = ByteArray(TOKEN_BYTES)
-        random.nextBytes(bytes)
-        val token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+        val token = newToken()
         tokenFile(context).writeText(token, Charsets.UTF_8)
         token
     }
 
     fun bearerHeader(context: Context): String = "Bearer ${getOrCreate(context)}"
 
-    fun matchesBearer(expectedToken: String, authorizationHeader: String?): Boolean {
-        val candidate = authorizationHeader
-            ?.takeIf { it.startsWith(BEARER_PREFIX, ignoreCase = true) }
-            ?.substring(BEARER_PREFIX.length)
-            ?.trim()
-            ?: return false
+    fun matchesBearer(expectedToken: String, authorizationHeader: String?): Boolean =
+        BearerTokenAuthenticator.matches(expectedToken, authorizationHeader)
 
-        val expectedBytes = expectedToken.toByteArray(Charsets.UTF_8)
-        val candidateBytes = candidate.toByteArray(Charsets.UTF_8)
-        return MessageDigest.isEqual(expectedBytes, candidateBytes)
+    private fun newToken(): String {
+        val bytes = ByteArray(TOKEN_BYTES)
+        random.nextBytes(bytes)
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
     }
 
     private fun tokenFile(context: Context): File =
@@ -58,5 +51,4 @@ object HubAccessTokenStore {
     private const val TOKEN_FILE_NAME = "local_mcp_access_token"
     private const val TOKEN_BYTES = 32
     private const val MIN_TOKEN_LENGTH = 32
-    private const val BEARER_PREFIX = "Bearer "
 }
