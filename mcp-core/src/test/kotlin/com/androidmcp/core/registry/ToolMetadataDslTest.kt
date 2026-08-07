@@ -12,6 +12,10 @@ class ToolMetadataDslTest {
             destructive = true
             idempotent = false
             latencyClass = LatencyClass.SLOW
+            mutation = MutationClass.MUTATING
+            sensitiveData = SensitiveDataClass.COMMUNICATIONS
+            confirmation = ConfirmationMode.ALWAYS
+            openWorld = true
             permission("POST_NOTIFICATIONS")
             permission("VIBRATE")
             failureMode(pattern = "denied", hint = "grant perm")
@@ -24,15 +28,22 @@ class ToolMetadataDslTest {
         assertTrue(md.destructive)
         assertEquals(false, md.idempotent)
         assertEquals(LatencyClass.SLOW, md.latencyClass)
+        assertEquals(MutationClass.MUTATING, md.mutation)
+        assertEquals(SensitiveDataClass.COMMUNICATIONS, md.sensitiveData)
+        assertEquals(ConfirmationMode.ALWAYS, md.confirmation)
+        assertEquals(true, md.openWorld)
         assertEquals(listOf("POST_NOTIFICATIONS", "VIBRATE"), md.permissions)
         assertEquals(2, md.failureModes.size)
         assertEquals(1, md.examples.size)
         assertEquals("post a simple note", md.examples[0].intent)
     }
 
-    @Test fun dsl_defaults_match_ToolMetadata_defaults() {
+    @Test fun dsl_defaults_match_ToolMetadata_defaults_and_are_conservative() {
         val md = toolMetadata {}
         assertEquals(ToolMetadata(), md)
+        assertEquals(MutationClass.UNKNOWN, md.mutation)
+        assertEquals(SensitiveDataClass.UNKNOWN, md.sensitiveData)
+        assertEquals(ConfirmationMode.POLICY, md.confirmation)
     }
 
     @Test fun example_args_capture_string_number_boolean() {
