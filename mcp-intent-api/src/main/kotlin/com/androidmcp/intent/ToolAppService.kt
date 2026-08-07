@@ -14,7 +14,7 @@ import com.androidmcp.core.registry.ToolRegistry
 import com.androidmcp.intent.v1.CapAppCallerTrustPolicy
 import com.androidmcp.intent.v1.ICapAppCallback
 import com.androidmcp.intent.v1.ICapAppService
-import com.androidmcp.intent.v1.SameSignerCallerTrustPolicy
+import com.androidmcp.intent.v1.OfficialHubSameSignerTrustPolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -40,7 +40,7 @@ abstract class ToolAppService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** Override with an explicit trust-store policy when third-party Hub pairing is supported. */
-    protected open val callerTrustPolicy: CapAppCallerTrustPolicy = SameSignerCallerTrustPolicy
+    protected open val callerTrustPolicy: CapAppCallerTrustPolicy = OfficialHubSameSignerTrustPolicy
 
     /**
      * Migration switch for the unauthenticated v0 Intent/broadcast protocol.
@@ -70,8 +70,6 @@ abstract class ToolAppService : Service() {
             enforceTrustedBinderCaller()
             requireNotNull(callback) { "callback is required" }
 
-            // Tool descriptors are small and already in memory; serialize synchronously so the
-            // caller receives a consistent snapshot without holding any long-running work here.
             val toolsJson = json.encodeToString(ListSerializer(ToolInfo.serializer()), registry.list())
             callback.onTools(toolsJson)
         }
