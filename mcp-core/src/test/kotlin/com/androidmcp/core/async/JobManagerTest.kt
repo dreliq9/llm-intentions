@@ -53,6 +53,22 @@ class JobManagerTest {
         jobManager?.shutdown()
     }
 
+    private fun awaitStatus(
+        jm: JobManager,
+        jobId: String,
+        expected: String,
+        timeoutMs: Long = 2_000,
+    ): JsonObject {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var last = Json.parseToJsonElement(jm.poll(jobId)).jsonObject
+        while (System.currentTimeMillis() < deadline) {
+            if (last["status"]?.jsonPrimitive?.content == expected) return last
+            Thread.sleep(20)
+            last = Json.parseToJsonElement(jm.poll(jobId)).jsonObject
+        }
+        fail("Timed out waiting for job $jobId to reach '$expected'; last state=$last")
+    }
+
     @Test
     fun `submit returns a job ID`() {
         val jm = makeJobManager()
@@ -168,10 +184,8 @@ class JobManagerTest {
         )
 
         val jobId = jm.submit(request)
-        Thread.sleep(500)
+        val result = awaitStatus(jm, jobId, "failed")
 
-        val result = Json.parseToJsonElement(jm.poll(jobId)).jsonObject
-        assertEquals("failed", result["status"]?.jsonPrimitive?.content)
         assertNotNull(result["response"])
     }
 
