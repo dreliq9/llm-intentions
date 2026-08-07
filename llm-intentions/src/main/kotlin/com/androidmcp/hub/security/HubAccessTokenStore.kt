@@ -17,20 +17,38 @@ object HubAccessTokenStore {
     private val lock = Any()
     private val random = SecureRandom()
 
-    fun getOrCreate(context: Context): String = synchronized(lock) {
-        val file = tokenFile(context)
-        val existing = if (file.exists()) file.readText(Charsets.UTF_8).trim() else ""
-        if (existing.length >= MIN_TOKEN_LENGTH) return@synchronized existing
+    @Volatile
+    private var cachedToken: String? = null
 
-        val token = newToken()
-        file.parentFile?.mkdirs()
-        file.writeText(token, Charsets.UTF_8)
-        token
+    fun getOrCreate(context: Context): String {
+        cachedToken?.takeIf { it.length >= MIN_TOKEN_LENGTH }?.let { return it }
+
+        return synchronized(lock) {
+            cachedToken?.takeIf { it.length >= MIN_TOKEN_LENGTH }?.let {
+                return@synchronized it
+            }
+
+            val file = tokenFile(context)
+            val existing = if (file.exists()) file.readText(Charsets.UTF_8).trim() else ""
+            val token = if (existing.length >= MIN_TOKEN_LENGTH) {
+                existing
+            } else {
+                newToken().also { generated ->
+                    file.parentFile?.mkdirs()
+                    file.writeText(generated, Charsets.UTF_8)
+                }
+            }
+            cachedToken = token
+            token
+        }
     }
 
     fun rotate(context: Context): String = synchronized(lock) {
         val token = newToken()
-        tokenFile(context).writeText(token, Charsets.UTF_8)
+        val file = tokenFile(context)
+        file.parentFile?.mkdirs()
+        file.writeText(token, Charsets.UTF_8)
+        cachedToken = token
         token
     }
 
