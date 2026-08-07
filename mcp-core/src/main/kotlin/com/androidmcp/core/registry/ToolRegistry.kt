@@ -33,7 +33,8 @@ class ToolRegistry {
 
     fun get(name: String): McpToolDef? = tools[name]
 
-    fun list(): List<ToolInfo> = tools.values.map { it.info }
+    /** Stable ordering improves MCP list caching and upstream LLM prompt-cache reuse. */
+    fun list(): List<ToolInfo> = tools.values.map { it.info }.sortedBy { it.name }
 
     fun size(): Int = tools.size
 }
@@ -100,6 +101,20 @@ fun jsonSchema(block: JsonSchemaBuilder.() -> Unit): JsonObject {
 }
 
 /**
+ * The existing LLM Intentions metadata predates MCP ToolAnnotations and uses
+ * `destructive` as the project's confirmation/side-effect flag: false for reads,
+ * true for operations that mutate device/user state. Preserve that meaning during
+ * migration by explicitly publishing readOnlyHint as its inverse. Marking every
+ * current write as destructive is intentionally conservative until Descriptor v1
+ * separates mutating/additive/destructive semantics.
+ */
+private fun ToolMetadata.toMcpAnnotations(): ToolAnnotations = ToolAnnotations(
+    readOnlyHint = !destructive,
+    destructiveHint = destructive,
+    idempotentHint = idempotent,
+)
+
+/**
  * Register a tool whose handler returns a raw String. The string is wrapped in an
  * OK envelope and rendered as MCP text content. On uncaught exception, the framework
  * (ToolAppService) converts it to a FAIL envelope using the failure_modes in metadata.
@@ -112,7 +127,12 @@ fun ToolRegistry.textTool(
     handler: suspend (JsonObject) -> String,
 ) {
     register(McpToolDef(
-        info = ToolInfo(name = name, description = description, inputSchema = params),
+        info = ToolInfo(
+            name = name,
+            description = description,
+            inputSchema = params,
+            annotations = metadata?.toMcpAnnotations(),
+        ),
         metadata = metadata,
         handler = { args ->
             val text = handler(args)
@@ -140,7 +160,12 @@ fun ToolRegistry.envelopeTool(
     handler: suspend (JsonObject) -> Envelope,
 ) {
     register(McpToolDef(
-        info = ToolInfo(name = name, description = description, inputSchema = params),
+        info = ToolInfo(
+            name = name,
+            description = description,
+            inputSchema = params,
+            annotations = metadata?.toMcpAnnotations(),
+        ),
         metadata = metadata,
         handler = { args ->
             val env = handler(args)

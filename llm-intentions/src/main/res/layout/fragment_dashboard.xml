@@ -9,7 +9,6 @@
         android:layout_height="wrap_content"
         android:orientation="vertical">
 
-        <!-- Status Card -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -30,9 +29,9 @@
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
+                    android:layout_marginTop="12dp"
                     android:gravity="center_vertical"
-                    android:layout_marginTop="12dp">
+                    android:orientation="horizontal">
 
                     <View
                         android:id="@+id/status_dot"
@@ -44,8 +43,8 @@
                         android:id="@+id/status_text"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
                         android:layout_marginStart="8dp"
+                        android:layout_weight="1"
                         android:text="Stopped"
                         android:textAppearance="?attr/textAppearanceBodyLarge" />
 
@@ -82,7 +81,6 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Refresh Button -->
         <com.google.android.material.button.MaterialButton
             android:id="@+id/refresh_button"
             android:layout_width="match_parent"
@@ -90,7 +88,6 @@
             android:layout_marginBottom="16dp"
             android:text="Refresh Apps" />
 
-        <!-- Config Card -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content">
@@ -105,8 +102,15 @@
                     android:id="@+id/config_label"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Claude Code Config"
+                    android:text="Authenticated Local MCP Config"
                     android:textAppearance="?attr/textAppearanceTitleMedium" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Advanced/developer access only. Keep the bearer token private."
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
 
                 <FrameLayout
                     android:layout_width="match_parent"
@@ -119,9 +123,9 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:fontFamily="monospace"
-                        android:textSize="12sp"
                         android:padding="12dp"
-                        android:paddingEnd="48dp" />
+                        android:paddingEnd="48dp"
+                        android:textSize="12sp" />
 
                     <ImageButton
                         android:id="@+id/copy_config_button"
@@ -130,12 +134,20 @@
                         android:layout_gravity="top|end"
                         android:layout_margin="4dp"
                         android:background="?attr/selectableItemBackgroundBorderless"
-                        android:contentDescription="Copy config"
-                        android:src="@android:drawable/ic_menu_save"
+                        android:contentDescription="Copy authenticated local MCP config"
+                        android:padding="8dp"
                         android:scaleType="centerInside"
-                        android:padding="8dp" />
+                        android:src="@android:drawable/ic_menu_save" />
 
                 </FrameLayout>
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/rotate_token_button"
+                    style="?attr/materialButtonOutlinedStyle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="Rotate local access token" />
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
