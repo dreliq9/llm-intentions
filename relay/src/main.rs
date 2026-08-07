@@ -1,4 +1,5 @@
 mod session;
+mod shared_store;
 
 use axum::{
     extract::{
@@ -13,13 +14,14 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use intentions_relay::{
     ensure_text_frame_bound, now_ms, relay_state_path_from_env, verify_device_auth, AuthChallenge,
-    ClientFrame, EnrollmentRequest, EnrollmentResponse, EnrollmentStore, RelayError, ServerFrame,
+    ClientFrame, EnrollmentRequest, EnrollmentResponse, RelayError, ServerFrame,
     DEFAULT_AUTH_CHALLENGE_TTL_MS, DEFAULT_ENROLLMENT_TTL_MS, MAX_TEXT_FRAME_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::{DispatchFailure, LiveSessionRouter, SESSION_OUTBOUND_CAPACITY};
 use sha2::{Digest, Sha256};
+use shared_store::SharedEnrollmentStore;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use subtle::ConstantTimeEq;
 use tokio::{
@@ -34,7 +36,7 @@ const ALLOWED_TEST_TOOLS: [&str; 2] = ["hub.relay_echo", "hub.relay_confirm_echo
 
 #[derive(Clone)]
 struct AppState {
-    enrollments: Arc<EnrollmentStore>,
+    enrollments: Arc<SharedEnrollmentStore>,
     sessions: Arc<LiveSessionRouter>,
     admin_token_digest: Option<[u8; 32]>,
 }
@@ -63,7 +65,7 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let command = args.next();
-    let store = Arc::new(EnrollmentStore::open(relay_state_path_from_env())?);
+    let store = Arc::new(SharedEnrollmentStore::open(relay_state_path_from_env())?);
 
     match command.as_deref() {
         None | Some("help") | Some("--help") | Some("-h") => {
@@ -85,7 +87,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ttl_seconds.saturating_mul(1000),
                 now_ms(),
             )?;
-            // Raw token is intentionally emitted only to this explicit administrative command.
             println!("{token}");
             Ok(())
         }
@@ -105,7 +106,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if args.next().is_some() {
                 return Err("too many arguments".into());
             }
-            for device in store.list_devices() {
+            for device in store.list_devices()? {
                 println!(
                     "{}\t{}\t{}\t{}",
                     device.device_id,
@@ -155,7 +156,7 @@ fn print_usage() {
 
 async fn serve(
     address: SocketAddr,
-    enrollments: Arc<EnrollmentStore>,
+    enrollments: Arc<SharedEnrollmentStore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let admin_token_digest = admin_token_digest_from_env();
     let state = AppState {
@@ -168,8 +169,6 @@ async fn serve(
         .route("/v1/device/enroll", post(enroll_device))
         .route("/v1/device/connect/{device_id}", get(connect_device));
 
-    // This is an operator-only harness for H3 end-to-end tests. If no separate admin secret is
-    // configured, the route does not exist at all.
     if state.admin_token_digest.is_some() {
         app = app.route(
             "/v1/admin/test-dispatch/{device_id}",
@@ -493,9 +492,7 @@ async fn handle_device_socket(mut socket: WebSocket, device_id: String, state: A
                             ClientFrame::AuthResponse { .. } => break,
                         }
                     }
-                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
-                        // axum/tungstenite handles protocol ping/pong framing; no application action.
-                    }
+                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                     Some(Ok(Message::Binary(_))) => break,
                 }
