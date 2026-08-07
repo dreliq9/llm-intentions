@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import com.androidmcp.hub.HubMcpEngine
+import com.androidmcp.hub.security.HubAccessTokenStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -31,6 +32,7 @@ class HubHttpService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification("Starting..."))
 
         engine = HubMcpEngine(this)
+        val accessToken = HubAccessTokenStore.getOrCreate(this)
 
         serviceScope.launch {
             withContext(Dispatchers.IO) {
@@ -39,11 +41,11 @@ class HubHttpService : Service() {
             sharedEngine = engine
             startedAtMillis = System.currentTimeMillis()
 
-            server = McpRawHttpServer(PORT, engine, json)
+            server = McpRawHttpServer(PORT, engine, json, accessToken)
             server?.start()
 
-            Log.i(TAG, "HTTP server started on 127.0.0.1:$PORT with ${engine.registry.size()} tools")
-            updateNotification("Running — ${engine.registry.size()} tools on localhost:$PORT")
+            Log.i(TAG, "Authenticated HTTP server started on 127.0.0.1:$PORT with ${engine.registry.size()} tools")
+            updateNotification("Running — authenticated localhost:$PORT")
         }
     }
 
@@ -66,7 +68,7 @@ class HubHttpService : Service() {
                 "LLM Intentions Service",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps LLM Intentions running for local MCP clients"
+                description = "Keeps LLM Intentions running for authenticated local MCP clients"
             }
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
