@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Package visibility: lets queryIntentServices() find MCP tool apps -->
+    <!-- Package visibility: lets queryIntentServices() find CapApp providers -->
     <queries>
+        <intent>
+            <action android:name="com.androidmcp.capapp.BIND_V1" />
+        </intent>
         <intent>
             <action android:name="com.androidmcp.tool.EXECUTE" />
         </intent>
