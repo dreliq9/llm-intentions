@@ -24,12 +24,12 @@
             android:name=".NotifyToolService"
             android:exported="true">
             <intent-filter>
-                <action android:name="com.androidmcp.tool.EXECUTE" />
-                <action android:name="com.androidmcp.tool.LIST_TOOLS" />
+                <action android:name="com.androidmcp.capapp.BIND_V1" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
             <meta-data android:name="com.androidmcp.TOOL_APP" android:value="true" />
             <meta-data android:name="com.androidmcp.NAMESPACE" android:value="notify" />
+            <meta-data android:name="com.androidmcp.PROTOCOL_VERSION" android:value="1" />
         </service>
 
         <service

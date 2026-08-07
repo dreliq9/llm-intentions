@@ -31,5 +31,14 @@ jobs:
       - name: Run core tests
         run: ./gradlew :mcp-core:test
 
-      - name: Compile Hub and SDK
-        run: ./gradlew :mcp-intent-api:assembleDebug :llm-intentions:assembleDebug
+      - name: Assemble Hub, SDK, and bundled CapApps
+        run: >-
+          ./gradlew
+          :mcp-intent-api:assembleDebug
+          :llm-intentions:assembleDebug
+          :tool-device:assembleDebug
+          :tool-notify:assembleDebug
+          :tool-people:assembleDebug
+          :tool-files:assembleDebug
+          :tool-files-dev:assembleDebug
+          :taichi-android:assembleDebug

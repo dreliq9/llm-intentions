@@ -7,6 +7,8 @@ import kotlinx.serialization.json.JsonObject
 
 class NotifyToolService : ToolAppService() {
 
+    protected override val legacyIntentProtocolEnabled: Boolean = false
+
     override fun onCreateTools(registry: ToolRegistry) {
         NotifyToolRegistrar.register(registry, applicationContext)
 

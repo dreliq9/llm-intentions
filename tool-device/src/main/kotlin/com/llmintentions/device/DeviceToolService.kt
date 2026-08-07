@@ -7,6 +7,9 @@ import kotlinx.serialization.json.JsonObject
 
 class DeviceToolService : ToolAppService() {
 
+    /** Device Tools is the Binder v1 canary; unauthenticated v0 execution is disabled. */
+    protected override val legacyIntentProtocolEnabled: Boolean = false
+
     override fun onCreateTools(registry: ToolRegistry) {
         DeviceToolRegistrar.register(registry, applicationContext)
 

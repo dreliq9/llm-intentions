@@ -4,6 +4,7 @@ import android.view.LayoutInflater
 import android.view.ViewGroup
 import androidx.recyclerview.widget.RecyclerView
 import com.androidmcp.hub.databinding.ItemAppBinding
+import com.androidmcp.hub.discovery.CapAppTransport
 import com.androidmcp.hub.discovery.DiscoveredApp
 import com.androidmcp.hub.health.IntentHealthMonitor
 
@@ -36,20 +37,24 @@ class AppsAdapter : RecyclerView.Adapter<AppsAdapter.AppViewHolder>() {
     class AppViewHolder(private val binding: ItemAppBinding) : RecyclerView.ViewHolder(binding.root) {
         fun bind(app: DiscoveredApp, health: IntentHealthMonitor.HealthStatus?) {
             binding.namespaceText.text = app.namespace
-            binding.packageText.text = app.packageName
+            val transportLabel = when (app.transport) {
+                CapAppTransport.BINDER_V1 -> "Binder v1"
+                CapAppTransport.INTENT_V0 -> "Legacy v0"
+            }
+            binding.packageText.text = "${app.packageName} • $transportLabel"
             binding.toolCountText.text = "${app.tools.size} tools"
 
             when {
                 health == null -> {
-                    binding.healthDot.setBackgroundColor(0xFF9E9E9E.toInt()) // gray
+                    binding.healthDot.setBackgroundColor(0xFF9E9E9E.toInt())
                     binding.latencyText.text = "..."
                 }
                 health.alive -> {
-                    binding.healthDot.setBackgroundColor(0xFF4CAF50.toInt()) // green
+                    binding.healthDot.setBackgroundColor(0xFF4CAF50.toInt())
                     binding.latencyText.text = "${health.roundTripMs}ms"
                 }
                 else -> {
-                    binding.healthDot.setBackgroundColor(0xFFF44336.toInt()) // red
+                    binding.healthDot.setBackgroundColor(0xFFF44336.toInt())
                     binding.latencyText.text = health.error ?: "Error"
                 }
             }
