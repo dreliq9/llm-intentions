@@ -19,6 +19,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test relay
+        run: cargo test --manifest-path relay/Cargo.toml
+
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
