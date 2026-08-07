@@ -15,6 +15,7 @@ import com.androidmcp.core.registry.McpToolDef
 import com.androidmcp.core.registry.ToolRegistry
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
