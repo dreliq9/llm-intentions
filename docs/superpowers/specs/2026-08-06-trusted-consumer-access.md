@@ -1,7 +1,7 @@
 # Trusted Consumer Access Architecture
 
 **Date:** 2026-08-06  
-**Status:** Proposed implementation direction  
+**Status:** Proposed implementation direction; H0/H1 implementation underway  
 **Goal:** Make LLM Intentions safe to expose beyond local CLI agents and usable by ordinary mobile chat users without requiring Termux, port forwarding, tunnels, or hand-edited MCP configuration.
 
 ## 1. Product direction
@@ -30,21 +30,34 @@ The phone remains the authority over its capabilities. The relay is transport, i
 ## 2. Non-negotiable security properties
 
 1. **Hub MCP stays loopback-only by default.** The local MCP listener binds to `127.0.0.1`, not `0.0.0.0`.
-2. **No direct Internet exposure of port 8379.** Remote model providers connect to a separate authenticated relay endpoint.
-3. **CapApps authenticate the Hub.** Merely knowing the Intent action names must not be sufficient to invoke privileged tools.
-4. **No caller-controlled reply package.** Tool results must return over an authenticated IPC channel rather than an arbitrary `reply_to` broadcast target.
-5. **Authorization is per request.** A relay connection or model identity does not imply blanket permission to invoke every tool.
-6. **The user can see and revoke trust.** Hub, CapApp, provider, and tool grants must have a user-visible control surface.
-7. **Destructive and sensitive operations are fail-closed.** Unknown metadata or missing policy must not silently become approval.
+2. **Loopback is not authentication.** The localhost MCP endpoint requires an app-private bearer credential so an unrelated APK cannot invoke Hub tools merely by opening `127.0.0.1:8379`.
+3. **No direct Internet exposure of port 8379.** Remote model providers connect to a separate authenticated relay endpoint.
+4. **CapApps authenticate the Hub.** Merely knowing the component/action names must not be sufficient to invoke privileged tools.
+5. **No caller-controlled reply package.** Tool results return over an authenticated IPC callback rather than an arbitrary `reply_to` broadcast target.
+6. **Authorization is per request.** A relay connection or model identity does not imply blanket permission to invoke every tool.
+7. **The user can see and revoke trust.** Hub, CapApp, provider, and tool grants must have a user-visible control surface.
+8. **Destructive and sensitive operations are fail-closed.** Unknown metadata or missing policy must not silently become approval.
+
+### 2.1 Local developer access
+
+CLI/local HTTP access is an advanced development surface, not the Android trust boundary.
+
+The Hub generates a high-entropy local MCP token in app-private, no-backup storage. Local HTTP clients send:
+
+```http
+Authorization: Bearer <device-local-token>
+```
+
+The Hub UI may expose/copy an authenticated localhost configuration on explicit user action. The token must never be logged, included in diagnostics, or used as the remote relay credential. Token rotation invalidates previously copied local configurations.
 
 ## 3. MCP modernization
 
-During migration the Hub should support two protocol eras:
+During migration the Hub supports two protocol eras:
 
 - `2025-06-18` through the existing initialize-era compatibility path.
 - `2026-07-28` as the preferred stateless path.
 
-The modern path must support at minimum:
+The modern path supports at minimum:
 
 - `server/discover`
 - per-request protocol metadata
@@ -59,13 +72,13 @@ MRTR (`input_required`) should be added when the policy/confirmation layer lands
 
 ## 4. CapApp Protocol v1: authenticated Binder IPC
 
-The current exported started-service + broadcast-response design is useful as a prototype but is not a sufficient trust boundary for third-party deployment. CapApp Protocol v1 should move invocation onto Android Binder.
+The exported started-service + broadcast-response design was useful as a prototype but is not a sufficient trust boundary for third-party deployment. CapApp Protocol v1 moves invocation onto Android Binder.
 
 ### 4.1 Discovery
 
-PackageManager Intent discovery can remain. A CapApp advertises a bindable capability service and protocol version in manifest metadata.
+PackageManager discovery remains. A CapApp advertises a bindable capability service and protocol version in manifest metadata.
 
-Discovery metadata should contain only non-sensitive descriptors. Discovery itself does not authorize execution.
+Discovery metadata contains only non-sensitive descriptors. Discovery itself does not authorize execution.
 
 ### 4.2 Invocation
 
@@ -73,15 +86,17 @@ A CapApp exposes a bound service with operations conceptually equivalent to:
 
 ```text
 getDescriptor()
-listTools()
-execute(toolName, arguments, requestContext)
+listTools(callback)
+execute(requestId, toolName, arguments, callback)
 ```
 
-Execution responses return directly over Binder (or a Binder callback for async work). The protocol does not accept an arbitrary reply package.
+Execution responses return over Binder callbacks. The protocol does not accept an arbitrary reply package, and slow tool work is dispatched asynchronously rather than holding a Binder thread.
 
 ### 4.3 Caller authentication
 
-For every Binder transaction the CapApp obtains the calling UID and resolves the package/signing identity through PackageManager. Trust records bind at least:
+For every Binder transaction the CapApp captures the calling UID while still inside the Binder transaction, then resolves/checks the installed caller's package/signing identity through PackageManager.
+
+Trust records for the final third-party model bind at least:
 
 ```text
 package name
@@ -91,13 +106,13 @@ first-approved timestamp
 last-seen timestamp
 ```
 
-The official Hub signer may be pre-trusted by first-party CapApps. Third-party CapApps and alternate Hub builds must support explicit pairing so the user can approve the installed Hub identity rather than trusting a package name alone.
+The first-party canary may use same-signer trust. Third-party CapApps and alternate Hub builds require explicit pairing so the user approves an installed Hub signing identity rather than trusting a package name alone.
 
-A custom normal permission is not an acceptable authentication mechanism. A signature permission is useful for same-signer first-party components, but it is not sufficient as the general third-party CapApp trust model. Android's Binder caller identity plus explicit certificate trust avoids custom-permission ownership/race problems and supports independently signed CapApps.
+A custom normal permission is not an acceptable authentication mechanism. A signature permission can help same-signer components, but it is not sufficient as the general third-party CapApp trust model.
 
 ### 4.4 Migration
 
-Protocol v0 Intent execution remains available only behind an explicit compatibility mode while bundled CapApps migrate. Once v1 coverage is complete, v0 execution should be disabled by default and eventually removed.
+Protocol v0 Intent execution remains only as compatibility while bundled CapApps migrate. A v1-capable component is preferred over v0; migrated CapApps disable v0 execution. Once v1 coverage is complete, v0 should be disabled by default and removed.
 
 ## 5. Tool descriptor v1
 
@@ -124,7 +139,7 @@ Unknown or absent safety metadata is treated conservatively.
 
 ## 6. Policy and consent engine
 
-Remote access requires a Hub-side authorization layer between MCP routing and CapApp invocation.
+Remote access requires a Hub-side authorization layer between MCP routing and CapApp invocation. Local bearer authentication answers **who may reach the developer HTTP endpoint**; it does not replace per-tool authorization.
 
 A policy decision considers:
 
@@ -162,6 +177,8 @@ On first enablement:
 4. Hub maintains an outbound TLS connection to the relay.
 
 Remote access is disabled by default and can be revoked from the phone at any time.
+
+The relay/device credential is separate from the localhost developer bearer token.
 
 ### 7.2 Transport
 
@@ -203,8 +220,10 @@ Termux and CLI agents remain an advanced/local-development path, not a prerequis
 ### H0 — Local transport hardening + modern protocol
 
 - loopback-only Hub listener
+- authenticated localhost developer endpoint
+- app-private token generation and explicit copy/config UI
 - Origin validation
-- bounded request body
+- bounded, byte-correct HTTP request parsing
 - MCP 2026-07-28 header/body validation
 - `server/discover`
 - deterministic tool/resource lists
@@ -256,10 +275,11 @@ Only after the trust and remote-access substrate is stable should the project ag
 The hardening/modernization milestone is complete when all of the following are true:
 
 1. A LAN host cannot reach the default Hub MCP endpoint.
-2. A malicious unrelated APK cannot invoke a privileged CapApp or receive its output.
-3. Existing initialize-era clients still work through compatibility mode.
-4. A 2026-07-28 MCP client can discover and call tools through the Hub using compliant headers and response shapes.
-5. Tool safety annotations survive CapApp → Hub → MCP client.
-6. Automated tests/builds protect these properties from regression.
+2. An unrelated APK cannot use unauthenticated localhost HTTP to make the Hub act as its capability deputy.
+3. A malicious unrelated APK cannot invoke a privileged v1 CapApp or receive its output directly.
+4. Existing initialize-era MCP clients can still work through compatibility semantics once configured with the local access credential.
+5. A 2026-07-28 MCP client can discover and call tools through the Hub using compliant headers and response shapes.
+6. Tool safety annotations survive CapApp → Hub → MCP client.
+7. Automated tests/builds protect these properties from regression.
 
 Only then should remote relay access be enabled for real user data.

@@ -7,6 +7,7 @@ import com.androidmcp.core.protocol.JsonRpcResponse
 import com.androidmcp.core.protocol.MCP_MODERN_PROTOCOL_VERSION
 import com.androidmcp.core.transport.McpHttpRequestValidator
 import com.androidmcp.hub.HubMcpEngine
+import com.androidmcp.hub.security.HubAccessTokenStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -30,6 +31,7 @@ import java.nio.charset.CodingErrorAction
  *
  * Security invariants:
  * - Bind loopback only. Remote access belongs behind the authenticated relay.
+ * - Require an app-private bearer credential even on loopback; localhost is not caller identity.
  * - Validate browser Origin to block DNS rebinding.
  * - Parse Content-Length as bytes, not decoded characters.
  * - Bound header/body sizes and reject unsupported transfer encodings.
@@ -39,6 +41,7 @@ internal class McpRawHttpServer(
     private val port: Int,
     private val engine: HubMcpEngine,
     private val json: Json,
+    private val accessToken: String,
 ) {
     private var serverSocket: ServerSocket? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -60,7 +63,7 @@ internal class McpRawHttpServer(
     fun start() {
         scope.launch {
             serverSocket = ServerSocket(port, 50, InetAddress.getByName(LOOPBACK_HOST))
-            Log.i(TAG, "Listening on $LOOPBACK_HOST:$port")
+            Log.i(TAG, "Listening on authenticated $LOOPBACK_HOST:$port")
 
             while (isActive) {
                 val client = try {
@@ -108,6 +111,13 @@ internal class McpRawHttpServer(
                         code = JsonRpcError.INVALID_REQUEST,
                         message = "Origin is not allowed for the local MCP endpoint",
                     ))
+                    out.flush()
+                    return
+                }
+
+                if (!HubAccessTokenStore.matchesBearer(accessToken, request.headers["authorization"])) {
+                    Log.w(TAG, "Rejected unauthenticated localhost MCP request")
+                    out.write(unauthorizedResponse())
                     out.flush()
                     return
                 }
@@ -348,6 +358,23 @@ internal class McpRawHttpServer(
         message = message,
     )
 
+    private fun unauthorizedResponse(): ByteArray {
+        val response = JsonRpcResponse(
+            error = JsonRpcError(
+                code = JsonRpcError.INVALID_REQUEST,
+                message = "Authentication required for local MCP access",
+            ),
+            id = null,
+        )
+        return httpResponse(
+            statusCode = 401,
+            statusText = "Unauthorized",
+            body = json.encodeToString(JsonRpcResponse.serializer(), response),
+            contentType = "application/json",
+            extraHeaders = mapOf("www-authenticate" to "Bearer realm=\"llm-intentions-local\""),
+        )
+    }
+
     private fun jsonRpcHttpError(
         statusCode: Int,
         statusText: String,
@@ -373,12 +400,16 @@ internal class McpRawHttpServer(
         statusText: String,
         body: String,
         contentType: String? = null,
+        extraHeaders: Map<String, String> = emptyMap(),
     ): ByteArray {
         val bodyBytes = body.toByteArray(Charsets.UTF_8)
         val headers = buildString {
             append("HTTP/1.1 $statusCode $statusText\r\n")
             if (contentType != null && body.isNotEmpty()) {
                 append("content-type: $contentType\r\n")
+            }
+            for ((name, value) in extraHeaders) {
+                append("$name: $value\r\n")
             }
             append("content-length: ${bodyBytes.size}\r\n")
             append("connection: close\r\n")
@@ -411,6 +442,7 @@ internal class McpRawHttpServer(
 
         private val HEADER_NAME = Regex("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
         private val SINGLETON_HEADERS = setOf(
+            "authorization",
             "content-length",
             "transfer-encoding",
             "origin",
