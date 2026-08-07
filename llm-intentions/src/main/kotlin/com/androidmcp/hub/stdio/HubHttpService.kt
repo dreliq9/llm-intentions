@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import com.androidmcp.hub.HubMcpEngine
+import com.androidmcp.hub.relay.RelayClient
 import com.androidmcp.hub.security.HubAccessTokenStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -23,6 +24,7 @@ class HubHttpService : Service() {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
     private lateinit var engine: HubMcpEngine
     private var server: McpRawHttpServer? = null
+    private var relayClient: RelayClient? = null
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -46,6 +48,11 @@ class HubHttpService : Service() {
             }
             server?.start()
 
+            relayClient = RelayClient(this@HubHttpService, engine).also { client ->
+                sharedRelayClient = client
+                client.startIfEnabled()
+            }
+
             Log.i(TAG, "Authenticated HTTP server started on 127.0.0.1:$PORT with ${engine.registry.size()} tools")
             updateNotification("Running — authenticated localhost:$PORT")
         }
@@ -55,6 +62,9 @@ class HubHttpService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        sharedRelayClient = null
+        relayClient?.stop()
+        relayClient = null
         serviceScope.cancel()
         server?.stop()
         engine.shutdown()
@@ -70,7 +80,7 @@ class HubHttpService : Service() {
                 "LLM Intentions Service",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps LLM Intentions running for authenticated local MCP clients"
+                description = "Keeps LLM Intentions running for authenticated local MCP and optional outbound relay access"
             }
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
@@ -107,6 +117,8 @@ class HubHttpService : Service() {
         private const val NOTIFICATION_ID = 1
 
         @Volatile var sharedEngine: HubMcpEngine? = null
+            private set
+        @Volatile var sharedRelayClient: RelayClient? = null
             private set
         @Volatile var startedAtMillis: Long = 0L
             private set
