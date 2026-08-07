@@ -1,3 +1,5 @@
+mod session;
+
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -15,12 +17,14 @@ use intentions_relay::{
     DEFAULT_AUTH_CHALLENGE_TTL_MS, DEFAULT_ENROLLMENT_TTL_MS,
 };
 use serde::Serialize;
+use session::{DispatchFailure, LiveSessionRouter, SESSION_OUTBOUND_CAPACITY};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tokio::time::{interval, timeout};
+use tokio::{sync::mpsc, time::{interval, timeout}};
 
 #[derive(Clone)]
 struct AppState {
     enrollments: Arc<EnrollmentStore>,
+    sessions: Arc<LiveSessionRouter>,
 }
 
 #[derive(Serialize)]
@@ -131,7 +135,10 @@ async fn serve(
     address: SocketAddr,
     enrollments: Arc<EnrollmentStore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let state = AppState { enrollments };
+    let state = AppState {
+        enrollments,
+        sessions: Arc::new(LiveSessionRouter::new()),
+    };
     let app = Router::new()
         .route("/health", get(health))
         .route("/v1/device/enroll", post(enroll_device))
@@ -245,38 +252,84 @@ async fn handle_device_socket(mut socket: WebSocket, device_id: String, state: A
         return;
     }
 
+    let session_id = challenge.session_id.clone();
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(SESSION_OUTBOUND_CAPACITY);
+    state
+        .sessions
+        .register(device_id.clone(), session_id.clone(), outbound_tx)
+        .await;
+
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+    let writer = tokio::spawn(async move {
+        while let Some(frame) = outbound_rx.recv().await {
+            let close_after = matches!(&frame, ServerFrame::SessionReplaced { .. });
+            let Ok(text) = serde_json::to_string(&frame) else {
+                break;
+            };
+            if ensure_text_frame_bound(&text).is_err()
+                || ws_sender.send(Message::Text(text.into())).await.is_err()
+            {
+                break;
+            }
+            if close_after {
+                let _ = ws_sender
+                    .send(Message::Close(None))
+                    .await;
+                break;
+            }
+        }
+    });
+
     let mut revocation_check = interval(Duration::from_secs(30));
     loop {
         tokio::select! {
             _ = revocation_check.tick() => {
                 if state.enrollments.get_active_device(&device_id).is_none() {
-                    let _ = socket.send(Message::Close(None)).await;
                     break;
                 }
             }
-            message = socket.next() => {
+            message = ws_receiver.next() => {
                 match message {
                     Some(Ok(Message::Text(text))) => {
-                        if ensure_text_frame_bound(text.as_str()).is_err()
-                            || serde_json::from_str::<ClientFrame>(text.as_str()).is_err()
-                        {
-                            let _ = socket.send(Message::Close(None)).await;
+                        if ensure_text_frame_bound(text.as_str()).is_err() {
                             break;
                         }
-                        // Dispatch responses become meaningful when the bounded live-session router
-                        // is attached. Unknown/unsolicited responses never create authority.
+                        let frame = match serde_json::from_str::<ClientFrame>(text.as_str()) {
+                            Ok(frame) => frame,
+                            Err(_) => break,
+                        };
+                        match frame {
+                            ClientFrame::DispatchResponse { request_id, response } => {
+                                let _ = state.sessions.complete_response(
+                                    &device_id,
+                                    &session_id,
+                                    &request_id,
+                                    Ok(response),
+                                ).await;
+                            }
+                            ClientFrame::DispatchError { request_id, code, message } => {
+                                let _ = state.sessions.complete_response(
+                                    &device_id,
+                                    &session_id,
+                                    &request_id,
+                                    Err(DispatchFailure::DeviceError(code, message)),
+                                ).await;
+                            }
+                            ClientFrame::AuthResponse { .. } => break,
+                        }
                     }
-                    Some(Ok(Message::Ping(payload))) => {
-                        if socket.send(Message::Pong(payload)).await.is_err() {
-                            break;
-                        }
+                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                        // axum/tungstenite handles protocol ping/pong framing; no application action.
                     }
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                    Some(Ok(Message::Binary(_))) | Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Binary(_))) => break,
                 }
             }
         }
     }
+
+    state.sessions.unregister(&device_id, &session_id).await;
+    writer.abort();
 }
 
 async fn send_server_frame(socket: &mut WebSocket, frame: &ServerFrame) -> Result<(), ()> {
