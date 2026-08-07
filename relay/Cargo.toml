@@ -8,6 +8,7 @@ license = "Apache-2.0"
 [dependencies]
 axum = { version = "0.8.9", features = ["json", "ws"] }
 base64 = "0.22.1"
+fs2 = "0.4.3"
 futures-util = "0.3.31"
 p256 = { version = "0.14.0", features = ["ecdsa", "pkcs8"] }
 rand = "0.8.5"
