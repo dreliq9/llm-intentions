@@ -19,6 +19,7 @@ import com.androidmcp.hub.intents.IntentScanner
 import com.androidmcp.hub.intents.IntentToolDefinitions
 import com.androidmcp.hub.meta.HubMetaTools
 import com.androidmcp.hub.routing.IntentToolRouter
+import com.androidmcp.hub.security.HubAuditLog
 import com.androidmcp.hub.security.HubToolAuthorizer
 import com.androidmcp.hub.system.DeviceControlTools
 import com.androidmcp.hub.system.NotificationTools
@@ -32,7 +33,8 @@ class HubMcpEngine(private val context: Context) {
     val discovery = IntentAppDiscovery(context)
     val intentEngine = IntentEngine(context)
     val healthMonitor = IntentHealthMonitor(context)
-    val toolAuthorizer = HubToolAuthorizer(context)
+    val auditLog = HubAuditLog(context.applicationContext)
+    val toolAuthorizer = HubToolAuthorizer(context, auditLog)
 
     private val router = IntentToolRouter(context)
     private val refreshExecutor = Executors.newSingleThreadExecutor { r ->
