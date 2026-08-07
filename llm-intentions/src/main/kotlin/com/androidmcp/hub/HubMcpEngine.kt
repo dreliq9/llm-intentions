@@ -18,9 +18,11 @@ import com.androidmcp.hub.intents.IntentEngine
 import com.androidmcp.hub.intents.IntentScanner
 import com.androidmcp.hub.intents.IntentToolDefinitions
 import com.androidmcp.hub.meta.HubMetaTools
+import com.androidmcp.hub.relay.RelayTestTools
 import com.androidmcp.hub.routing.IntentToolRouter
 import com.androidmcp.hub.security.HubAuditLog
 import com.androidmcp.hub.security.HubToolAuthorizer
+import com.androidmcp.hub.security.PolicyAdminTools
 import com.androidmcp.hub.system.DeviceControlTools
 import com.androidmcp.hub.system.NotificationTools
 import com.androidmcp.hub.system.SystemToolDefinitions
@@ -58,7 +60,7 @@ class HubMcpEngine(private val context: Context) {
         registerPackageReceiver()
 
         dispatcher = McpDispatcher(
-            serverInfo = Implementation("LLM Intentions", "0.6.0"),
+            serverInfo = Implementation("LLM Intentions", "0.7.0"),
             toolRegistry = registry,
             toolAuthorizer = toolAuthorizer,
             instructions = buildInstructions(),
@@ -97,6 +99,14 @@ class HubMcpEngine(private val context: Context) {
             }
         ).registerAll(registry)
 
+        // Synthetic relay targets touch no personal/device data. Remote calls still require an
+        // explicit principal/tool grant and pass through the same dispatcher authorizer.
+        RelayTestTools().registerAll(registry)
+
+        // Local developer administration only. These tools carry CREDENTIALS sensitivity so H2's
+        // hard remote policy denies them regardless of any accidental grant.
+        PolicyAdminTools(toolAuthorizer.grantStore).registerAll(registry)
+
         InboxTools().registerAll(registry)
 
         if (::dispatcher.isInitialized) {
@@ -105,14 +115,14 @@ class HubMcpEngine(private val context: Context) {
     }
 
     private fun buildInstructions(): String = buildString {
-        appendLine("LLM Intentions v0.6.0 — trusted Android capability gateway.")
+        appendLine("LLM Intentions v0.7.0 — trusted Android capability gateway.")
         appendLine("Local developer transport: authenticated streamable-http on 127.0.0.1:8379/mcp.")
-        appendLine("Remote provider calls must arrive through a transport-authenticated principal and Hub policy.")
+        appendLine("Optional remote access: outbound authenticated Intentions Relay, gated by Hub grants and consent.")
         appendLine()
         appendLine("Tools are namespaced by source:")
         appendLine("  - android.* — Share, Intent dispatch, maps, dialer, calendar, deep links, query apps")
         appendLine("  - system.* — Battery, clipboard, wifi, volume, notifications, torch, vibrate, media, brightness, ringer, toast")
-        appendLine("  - hub.* — Status, health, refresh, inbox")
+        appendLine("  - hub.* — Status, health, refresh, inbox, synthetic relay tests, local policy admin")
         for (app in discoveredApps) {
             appendLine(
                 "  - ${app.namespace}.* — ${app.packageName} (${app.tools.size} tools, ${app.transport})"
@@ -122,8 +132,8 @@ class HubMcpEngine(private val context: Context) {
         appendLine("Total: ${registry.size()} tools from ${discoveredApps.size + 3} sources")
         appendLine()
         appendLine("Tool annotations are hints; deterministic Hub authorization is the execution gate.")
-        appendLine("Use android.send_intent only when the requested Android action is explicit and appropriate.")
-        appendLine("Use android.query_intent to discover available handlers.")
+        appendLine("Remote provider identity is supplied only by the authenticated relay transport, never MCP _meta.")
+        appendLine("Use hub.relay_echo and hub.relay_confirm_echo for relay tests before granting real CapApps.")
         val inboxCount = InboxManager.size()
         if (inboxCount > 0) {
             appendLine("  ** $inboxCount unread message(s) in inbox **")
