@@ -2,44 +2,51 @@ package com.androidmcp.intent
 
 import android.app.Service
 import android.content.Intent
-import android.os.Bundle
+import android.os.Binder
 import android.os.IBinder
 import android.util.Log
 import com.androidmcp.core.protocol.ContentBlock
+import com.androidmcp.core.protocol.Envelope
+import com.androidmcp.core.protocol.EnvelopeStatus
 import com.androidmcp.core.protocol.ToolCallResult
 import com.androidmcp.core.protocol.ToolInfo
 import com.androidmcp.core.registry.ToolRegistry
-import kotlinx.coroutines.*
-import kotlinx.serialization.json.*
+import com.androidmcp.intent.v1.CapAppCallerTrustPolicy
+import com.androidmcp.intent.v1.ICapAppCallback
+import com.androidmcp.intent.v1.ICapAppService
+import com.androidmcp.intent.v1.SameSignerCallerTrustPolicy
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
- * Base Service that tool apps extend to participate in the MCP Intent protocol.
+ * Base Service that tool apps extend to participate in CapApp local IPC.
  *
- * Subclasses override [onCreateTools] to register their tools.
- * The service handles incoming EXECUTE and LIST_TOOLS intents automatically,
- * dispatching tool calls and sending results back to the Hub via broadcast.
- *
- * Communication:
- *   Hub → App: startService() with ACTION_EXECUTE / ACTION_LIST_TOOLS
- *   App ��� Hub: sendBroadcast() with ACTION_TOOL_RESULT + callback_id
- *
- * Manifest declaration:
- * ```xml
- * <service android:name=".MyToolService" android:exported="true">
- *     <intent-filter>
- *         <action android:name="com.androidmcp.tool.EXECUTE" />
- *         <action android:name="com.androidmcp.tool.LIST_TOOLS" />
- *     </intent-filter>
- *     <meta-data android:name="com.androidmcp.TOOL_APP" android:value="true" />
- *     <meta-data android:name="com.androidmcp.NAMESPACE" android:value="myapp" />
- * </service>
- * ```
+ * Protocol v1 is an authenticated bound Binder API. Protocol v0 (started service + broadcast
+ * reply) remains as an explicit migration path for already-deployed CapApps and can be disabled
+ * per service with [legacyIntentProtocolEnabled].
  */
 abstract class ToolAppService : Service() {
 
     private val registry = ToolRegistry()
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Override with an explicit trust-store policy when third-party Hub pairing is supported. */
+    protected open val callerTrustPolicy: CapAppCallerTrustPolicy = SameSignerCallerTrustPolicy
+
+    /**
+     * Migration switch for the unauthenticated v0 Intent/broadcast protocol.
+     * New first-party CapApps should set this to false once their Hub path uses Binder v1.
+     */
+    protected open val legacyIntentProtocolEnabled: Boolean = true
 
     override fun onCreate() {
         super.onCreate()
@@ -49,19 +56,112 @@ abstract class ToolAppService : Service() {
 
     abstract fun onCreateTools(registry: ToolRegistry)
 
+    private val binder = object : ICapAppService.Stub() {
+        override fun getDescriptorJson(): String {
+            enforceTrustedBinderCaller()
+            return buildJsonObject {
+                put("protocolVersion", McpIntentConstants.CAPAPP_PROTOCOL_V1)
+                put("transport", "binder")
+                put("toolCount", registry.size())
+            }.toString()
+        }
+
+        override fun listTools(callback: ICapAppCallback?) {
+            enforceTrustedBinderCaller()
+            requireNotNull(callback) { "callback is required" }
+
+            // Tool descriptors are small and already in memory; serialize synchronously so the
+            // caller receives a consistent snapshot without holding any long-running work here.
+            val toolsJson = json.encodeToString(ListSerializer(ToolInfo.serializer()), registry.list())
+            callback.onTools(toolsJson)
+        }
+
+        override fun execute(
+            requestId: String?,
+            toolName: String?,
+            argumentsJson: String?,
+            callback: ICapAppCallback?,
+        ) {
+            // Capture and authorize the Binder caller before hopping to a coroutine. Once work is
+            // dispatched to another thread Binder.getCallingUid() no longer represents the remote
+            // transaction that invoked this method.
+            enforceTrustedBinderCaller()
+
+            require(!requestId.isNullOrBlank()) { "requestId is required" }
+            require(!toolName.isNullOrBlank()) { "toolName is required" }
+            requireNotNull(callback) { "callback is required" }
+
+            val toolDef = registry.get(toolName)
+            if (toolDef == null) {
+                callback.onError(requestId, ERROR_TOOL_NOT_FOUND, "Tool not found: $toolName")
+                return
+            }
+
+            scope.launch {
+                try {
+                    val args = json.parseToJsonElement(argumentsJson ?: "{}").let { element ->
+                        element as? JsonObject ?: throw IllegalArgumentException("arguments must be a JSON object")
+                    }
+                    val result = toolDef.handler(args)
+                    callback.onResult(
+                        requestId,
+                        json.encodeToString(ToolCallResult.serializer(), result),
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "Binder tool execution failed: $toolName", e)
+                    val env = Envelope.fromException(
+                        toolName = toolName,
+                        metadata = toolDef.metadata,
+                        exception = e,
+                    )
+                    val result = ToolCallResult(
+                        content = listOf(ContentBlock.text(env.renderText())),
+                        isError = env.status == EnvelopeStatus.FAIL,
+                    )
+                    try {
+                        callback.onResult(
+                            requestId,
+                            json.encodeToString(ToolCallResult.serializer(), result),
+                        )
+                    } catch (callbackError: Exception) {
+                        Log.w(TAG, "Unable to return Binder result for $requestId", callbackError)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun enforceTrustedBinderCaller() {
+        val callingUid = Binder.getCallingUid()
+        if (callerTrustPolicy.isTrusted(this, callingUid)) return
+
+        val packages = packageManager.getPackagesForUid(callingUid)?.joinToString(",") ?: "unknown"
+        Log.w(TAG, "Rejected untrusted Binder caller uid=$callingUid packages=$packages")
+        throw SecurityException("Caller is not trusted for CapApp Protocol v1")
+    }
+
+    override fun onBind(intent: Intent?): IBinder? {
+        return if (intent?.action == McpIntentConstants.ACTION_BIND_V1) binder else null
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) return START_NOT_STICKY
 
+        if (!legacyIntentProtocolEnabled) {
+            Log.w(TAG, "Rejected legacy CapApp v0 invocation: ${intent.action}")
+            return START_NOT_STICKY
+        }
+
         when (intent.action) {
-            McpIntentConstants.ACTION_EXECUTE -> handleExecute(intent)
-            McpIntentConstants.ACTION_LIST_TOOLS -> handleListTools(intent)
-            else -> Log.w(TAG, "Unknown action: ${intent.action}")
+            McpIntentConstants.ACTION_EXECUTE -> handleLegacyExecute(intent)
+            McpIntentConstants.ACTION_LIST_TOOLS -> handleLegacyListTools(intent)
+            else -> Log.w(TAG, "Unknown legacy action: ${intent.action}")
         }
 
         return START_NOT_STICKY
     }
 
-    private fun handleExecute(intent: Intent) {
+    private fun handleLegacyExecute(intent: Intent) {
         val toolName = intent.getStringExtra(McpIntentConstants.EXTRA_TOOL_NAME)
         val argsJson = intent.getStringExtra(McpIntentConstants.EXTRA_ARGUMENTS) ?: "{}"
         val callbackId = intent.getStringExtra(McpIntentConstants.EXTRA_CALLBACK_ID)
@@ -74,52 +174,52 @@ abstract class ToolAppService : Service() {
 
         val toolDef = registry.get(toolName)
         if (toolDef == null) {
-            val env = com.androidmcp.core.protocol.Envelope.fail(
+            val env = Envelope.fail(
                 summary = "Tool not found: $toolName",
                 hint = "Check tools/list for available names in this CapApp's namespace.",
             )
-            sendEnvelope(replyTo, callbackId, env)
+            sendLegacyEnvelope(replyTo, callbackId, env)
             return
         }
 
         scope.launch {
             try {
-                val args = json.parseToJsonElement(argsJson).jsonObject
+                val args = json.parseToJsonElement(argsJson).let { element ->
+                    element as? JsonObject ?: throw IllegalArgumentException("arguments must be a JSON object")
+                }
                 val result = toolDef.handler(args)
-                // Handler already returned a ToolCallResult whose text content is envelope-rendered
-                // (via textTool / envelopeTool). Forward as-is.
-                sendResult(
+                sendLegacyResult(
                     replyTo = replyTo,
                     callbackId = callbackId,
                     isError = result.isError,
-                    data = json.encodeToString(com.androidmcp.core.protocol.ToolCallResult.serializer(), result),
+                    data = json.encodeToString(ToolCallResult.serializer(), result),
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Tool execution failed: $toolName", e)
-                val env = com.androidmcp.core.protocol.Envelope.fromException(
+                val env = Envelope.fromException(
                     toolName = toolName,
                     metadata = toolDef.metadata,
                     exception = e,
                 )
-                sendEnvelope(replyTo, callbackId, env)
+                sendLegacyEnvelope(replyTo, callbackId, env)
             }
         }
     }
 
-    private fun sendEnvelope(replyTo: String, callbackId: String, env: com.androidmcp.core.protocol.Envelope) {
-        val result = com.androidmcp.core.protocol.ToolCallResult(
-            content = listOf(com.androidmcp.core.protocol.ContentBlock.text(env.renderText())),
-            isError = env.status == com.androidmcp.core.protocol.EnvelopeStatus.FAIL,
+    private fun sendLegacyEnvelope(replyTo: String, callbackId: String, env: Envelope) {
+        val result = ToolCallResult(
+            content = listOf(ContentBlock.text(env.renderText())),
+            isError = env.status == EnvelopeStatus.FAIL,
         )
-        sendResult(
+        sendLegacyResult(
             replyTo = replyTo,
             callbackId = callbackId,
             isError = result.isError,
-            data = json.encodeToString(com.androidmcp.core.protocol.ToolCallResult.serializer(), result),
+            data = json.encodeToString(ToolCallResult.serializer(), result),
         )
     }
 
-    private fun handleListTools(intent: Intent) {
+    private fun handleLegacyListTools(intent: Intent) {
         val callbackId = intent.getStringExtra(McpIntentConstants.EXTRA_CALLBACK_ID)
         val replyTo = intent.getStringExtra(McpIntentConstants.EXTRA_REPLY_TO)
 
@@ -129,10 +229,7 @@ abstract class ToolAppService : Service() {
         }
 
         val tools = registry.list()
-        val toolsJson = json.encodeToString(
-            kotlinx.serialization.builtins.ListSerializer(ToolInfo.serializer()),
-            tools
-        )
+        val toolsJson = json.encodeToString(ListSerializer(ToolInfo.serializer()), tools)
 
         val reply = Intent(McpIntentConstants.ACTION_TOOL_RESULT).apply {
             setPackage(replyTo)
@@ -140,13 +237,10 @@ abstract class ToolAppService : Service() {
             putExtra(McpIntentConstants.RESULT_KEY_TOOL_DEFINITIONS, toolsJson)
         }
         sendBroadcast(reply)
-        Log.i(TAG, "LIST_TOOLS: sent ${tools.size} tool definitions to $replyTo")
+        Log.i(TAG, "LIST_TOOLS: sent ${tools.size} legacy tool definitions to $replyTo")
     }
 
-    /**
-     * Send a tool execution result back to the Hub via broadcast.
-     */
-    private fun sendResult(replyTo: String, callbackId: String, isError: Boolean, data: String) {
+    private fun sendLegacyResult(replyTo: String, callbackId: String, isError: Boolean, data: String) {
         val reply = Intent(McpIntentConstants.ACTION_TOOL_RESULT).apply {
             setPackage(replyTo)
             putExtra(McpIntentConstants.EXTRA_CALLBACK_ID, callbackId)
@@ -154,10 +248,8 @@ abstract class ToolAppService : Service() {
             putExtra(McpIntentConstants.RESULT_KEY_IS_ERROR, isError)
         }
         sendBroadcast(reply)
-        Log.i(TAG, "Result sent for callback $callbackId to $replyTo (error=$isError)")
+        Log.i(TAG, "Legacy result sent for callback $callbackId to $replyTo (error=$isError)")
     }
-
-    override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
         super.onDestroy()
@@ -167,6 +259,6 @@ abstract class ToolAppService : Service() {
 
     companion object {
         private const val TAG = "MCP-ToolApp"
+        private const val ERROR_TOOL_NOT_FOUND = 404
     }
 }
-
