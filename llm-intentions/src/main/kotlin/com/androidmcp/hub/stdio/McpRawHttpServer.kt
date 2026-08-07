@@ -5,9 +5,9 @@ import com.androidmcp.core.protocol.JsonRpcError
 import com.androidmcp.core.protocol.JsonRpcRequest
 import com.androidmcp.core.protocol.JsonRpcResponse
 import com.androidmcp.core.protocol.MCP_MODERN_PROTOCOL_VERSION
+import com.androidmcp.core.transport.BearerTokenAuthenticator
 import com.androidmcp.core.transport.McpHttpRequestValidator
 import com.androidmcp.hub.HubMcpEngine
-import com.androidmcp.hub.security.HubAccessTokenStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -32,6 +32,7 @@ import java.nio.charset.CodingErrorAction
  * Security invariants:
  * - Bind loopback only. Remote access belongs behind the authenticated relay.
  * - Require an app-private bearer credential even on loopback; localhost is not caller identity.
+ * - Resolve the expected bearer credential per request so rotation revokes prior configs instantly.
  * - Validate browser Origin to block DNS rebinding.
  * - Parse Content-Length as bytes, not decoded characters.
  * - Bound header/body sizes and reject unsupported transfer encodings.
@@ -41,7 +42,7 @@ internal class McpRawHttpServer(
     private val port: Int,
     private val engine: HubMcpEngine,
     private val json: Json,
-    private val accessToken: String,
+    private val accessTokenProvider: () -> String,
 ) {
     private var serverSocket: ServerSocket? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -115,7 +116,11 @@ internal class McpRawHttpServer(
                     return
                 }
 
-                if (!HubAccessTokenStore.matchesBearer(accessToken, request.headers["authorization"])) {
+                if (!BearerTokenAuthenticator.matches(
+                        accessTokenProvider(),
+                        request.headers["authorization"],
+                    )
+                ) {
                     Log.w(TAG, "Rejected unauthenticated localhost MCP request")
                     out.write(unauthorizedResponse())
                     out.flush()
@@ -313,7 +318,6 @@ internal class McpRawHttpServer(
             if (validation.modern) {
                 jsonResponse(statusCode, statusText, responseJson)
             } else {
-                // Preserve the response framing that existing deployed clients already use.
                 sseResponse(responseJson)
             }
         } catch (e: Exception) {

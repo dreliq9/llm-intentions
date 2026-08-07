@@ -32,7 +32,7 @@ class HubHttpService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification("Starting..."))
 
         engine = HubMcpEngine(this)
-        val accessToken = HubAccessTokenStore.getOrCreate(this)
+        HubAccessTokenStore.getOrCreate(this)
 
         serviceScope.launch {
             withContext(Dispatchers.IO) {
@@ -41,7 +41,9 @@ class HubHttpService : Service() {
             sharedEngine = engine
             startedAtMillis = System.currentTimeMillis()
 
-            server = McpRawHttpServer(PORT, engine, json, accessToken)
+            server = McpRawHttpServer(PORT, engine, json) {
+                HubAccessTokenStore.getOrCreate(this@HubHttpService)
+            }
             server?.start()
 
             Log.i(TAG, "Authenticated HTTP server started on 127.0.0.1:$PORT with ${engine.registry.size()} tools")

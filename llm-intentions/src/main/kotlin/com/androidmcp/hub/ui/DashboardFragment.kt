@@ -8,6 +8,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import com.androidmcp.hub.databinding.FragmentDashboardBinding
@@ -62,10 +63,47 @@ class DashboardFragment : Fragment() {
         }
 
         binding.portText.text = "Port: ${HubHttpService.PORT} (localhost only)"
+        renderLocalConfig()
 
+        binding.copyConfigButton.setOnClickListener {
+            val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(
+                ClipData.newPlainText("LLM Intentions MCP Config", currentLocalConfig())
+            )
+            Toast.makeText(requireContext(), "Authenticated local config copied", Toast.LENGTH_SHORT).show()
+        }
+
+        binding.rotateTokenButton.setOnClickListener {
+            AlertDialog.Builder(requireContext())
+                .setTitle("Rotate local access token?")
+                .setMessage(
+                    "Previously copied local MCP configurations will stop working immediately. " +
+                        "You will need to copy the new configuration to any CLI or developer client."
+                )
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Rotate") { _, _ ->
+                    HubAccessTokenStore.rotate(requireContext())
+                    renderLocalConfig()
+                    Toast.makeText(
+                        requireContext(),
+                        "Local token rotated. Previous configs are revoked.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+                .show()
+        }
+    }
+
+    private fun renderLocalConfig() {
+        binding.configLabel.text = "Authenticated Local MCP Config"
+        binding.configJson.text = currentLocalConfig()
+        binding.configJson.setOnClickListener(null)
+    }
+
+    private fun currentLocalConfig(): String {
         val port = HubHttpService.PORT
         val accessToken = HubAccessTokenStore.getOrCreate(requireContext())
-        val localConfig = buildString {
+        return buildString {
             appendLine("{")
             appendLine("  \"mcpServers\": {")
             appendLine("    \"hub\": {")
@@ -78,21 +116,12 @@ class DashboardFragment : Fragment() {
             appendLine("  }")
             append("}")
         }
-
-        binding.configLabel.text = "Authenticated Local MCP Config"
-        binding.configJson.text = localConfig
-        binding.configJson.setOnClickListener(null)
-
-        binding.copyConfigButton.setOnClickListener {
-            val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("LLM Intentions MCP Config", localConfig))
-            Toast.makeText(requireContext(), "Authenticated local config copied", Toast.LENGTH_SHORT).show()
-        }
     }
 
     override fun onResume() {
         super.onResume()
         viewModel.refreshState()
+        if (_binding != null) renderLocalConfig()
     }
 
     override fun onDestroyView() {
