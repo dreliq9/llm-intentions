@@ -9,9 +9,9 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
 import androidx.fragment.app.Fragment
-import java.net.NetworkInterface
 import androidx.fragment.app.activityViewModels
 import com.androidmcp.hub.databinding.FragmentDashboardBinding
+import com.androidmcp.hub.security.HubAccessTokenStore
 import com.androidmcp.hub.stdio.HubHttpService
 
 class DashboardFragment : Fragment() {
@@ -61,84 +61,38 @@ class DashboardFragment : Fragment() {
             viewModel.refreshApps()
         }
 
-        binding.portText.text = "Port: ${HubHttpService.PORT}"
+        binding.portText.text = "Port: ${HubHttpService.PORT} (localhost only)"
 
-        val networkIp = getReachableIp()
         val port = HubHttpService.PORT
+        val accessToken = HubAccessTokenStore.getOrCreate(requireContext())
         val localConfig = buildString {
             appendLine("{")
             appendLine("  \"mcpServers\": {")
             appendLine("    \"hub\": {")
             appendLine("      \"type\": \"http\",")
-            appendLine("      \"url\": \"http://127.0.0.1:$port/mcp\"")
-            appendLine("    }")
-            appendLine("  }")
-            append("}")
-        }
-        val remoteConfig = buildString {
-            appendLine("{")
-            appendLine("  \"mcpServers\": {")
-            appendLine("    \"hub\": {")
-            appendLine("      \"type\": \"http\",")
-            appendLine("      \"url\": \"http://$networkIp:$port/mcp\"")
+            appendLine("      \"url\": \"http://127.0.0.1:$port/mcp\",")
+            appendLine("      \"headers\": {")
+            appendLine("        \"Authorization\": \"Bearer $accessToken\"")
+            appendLine("      }")
             appendLine("    }")
             appendLine("  }")
             append("}")
         }
 
-        var showingLocal = true
-        fun updateConfigDisplay() {
-            binding.configJson.text = if (showingLocal) localConfig else remoteConfig
-        }
-        updateConfigDisplay()
-
-        binding.configLabel.text = if (networkIp != "127.0.0.1")
-            "Claude Code Config  (local)" else "Claude Code Config"
-
-        binding.configJson.setOnClickListener {
-            if (networkIp == "127.0.0.1") return@setOnClickListener
-            showingLocal = !showingLocal
-            binding.configLabel.text = "Claude Code Config  (${if (showingLocal) "local" else "remote"})"
-            updateConfigDisplay()
-        }
+        binding.configLabel.text = "Authenticated Local MCP Config"
+        binding.configJson.text = localConfig
+        binding.configJson.setOnClickListener(null)
 
         binding.copyConfigButton.setOnClickListener {
-            val text = if (showingLocal) localConfig else remoteConfig
             val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("MCP Config", text))
-            val label = if (showingLocal) "Local config copied" else "Remote config copied"
-            Toast.makeText(requireContext(), label, Toast.LENGTH_SHORT).show()
+            clipboard.setPrimaryClip(ClipData.newPlainText("LLM Intentions MCP Config", localConfig))
+            Toast.makeText(requireContext(), "Authenticated local config copied", Toast.LENGTH_SHORT).show()
         }
     }
 
     override fun onResume() {
         super.onResume()
         viewModel.refreshState()
-    }
-
-    private fun getReachableIp(): String {
-        try {
-            for (iface in NetworkInterface.getNetworkInterfaces()) {
-                // Prefer Tailscale interface
-                if (iface.name.startsWith("tun") || iface.name.startsWith("tailscale") || iface.name.startsWith("utun")) {
-                    for (addr in iface.inetAddresses) {
-                        if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
-                            return addr.hostAddress ?: continue
-                        }
-                    }
-                }
-            }
-            // Fall back to any non-loopback IPv4
-            for (iface in NetworkInterface.getNetworkInterfaces()) {
-                if (iface.isLoopback || !iface.isUp) continue
-                for (addr in iface.inetAddresses) {
-                    if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
-                        return addr.hostAddress ?: continue
-                    }
-                }
-            }
-        } catch (_: Exception) {}
-        return "127.0.0.1"
     }
 
     override fun onDestroyView() {
