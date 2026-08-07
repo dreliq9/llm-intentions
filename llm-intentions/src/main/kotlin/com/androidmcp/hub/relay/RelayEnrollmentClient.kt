@@ -1,6 +1,7 @@
 package com.androidmcp.hub.relay
 
 import android.content.Context
+import com.androidmcp.hub.stdio.HubHttpService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -65,6 +66,10 @@ class RelayEnrollmentClient(context: Context) {
                 enabled = false,
             )
             store.save(enrollment)
+
+            // A replacement enrollment is always saved disabled. Immediately re-read the store so
+            // an old enrollment cannot leave its previously enabled socket alive after replacement.
+            HubHttpService.sharedRelayClient?.refreshFromEnrollment()
             enrollment
         }
     }
