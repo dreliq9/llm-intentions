@@ -1,4 +1,4 @@
-use crate::{
+use intentions_relay::{
     verify_enrollment_proof, DeviceEnrollment, EnrollmentRequest, PendingEnrollment, RelayError,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -46,7 +46,6 @@ impl SharedEnrollmentStore {
             lock_path,
             process_lock: Mutex::new(()),
         };
-        // Validate any existing file immediately.
         store.with_locked(false, |state| Ok(state.clone()))?;
         Ok(store)
     }
@@ -88,8 +87,6 @@ impl SharedEnrollmentStore {
         let digest = token_digest(&request.token);
         self.with_locked(true, |state| {
             cleanup_pending(state, clock_ms);
-            // Check the high-entropy one-time token before doing public-key work. Invalid public
-            // requests therefore cannot force ECDSA verification without knowing a live token.
             let pending = state
                 .pending_enrollments
                 .get(&digest)
@@ -100,6 +97,8 @@ impl SharedEnrollmentStore {
                 return Err(RelayError::InvalidEnrollmentToken);
             }
 
+            // Verify proof only after confirming the caller knows a live high-entropy token. This
+            // avoids turning the public enrollment route into an unauthenticated ECDSA-work oracle.
             verify_enrollment_proof(request)?;
             state.pending_enrollments.remove(&digest);
 
@@ -172,8 +171,6 @@ impl SharedEnrollmentStore {
             Ok(value)
         })();
 
-        // Unlock errors matter only if the operation otherwise succeeded; the process-local mutex
-        // remains held until after this call, so a same-process operation cannot race the unlock.
         let unlock_result = FileExt::unlock(&lock_file).map_err(RelayError::Io);
         match (result, unlock_result) {
             (Err(error), _) => Err(error),
@@ -229,7 +226,7 @@ fn persist_state(path: &Path, state: &DiskState) -> Result<(), RelayError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enrollment_proof_message;
+    use intentions_relay::enrollment_proof_message;
     use p256::{
         ecdsa::{signature::Signer, Signature, SigningKey},
         pkcs8::EncodePublicKey,
