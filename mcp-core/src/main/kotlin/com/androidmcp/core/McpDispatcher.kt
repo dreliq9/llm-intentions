@@ -1,5 +1,9 @@
 package com.androidmcp.core
 
+import com.androidmcp.core.policy.ToolAuthorizationOutcome
+import com.androidmcp.core.policy.ToolAuthorizationRequest
+import com.androidmcp.core.policy.ToolCallAuthorizer
+import com.androidmcp.core.policy.ToolInvocationSecurityContext
 import com.androidmcp.core.protocol.*
 import com.androidmcp.core.registry.ResourceRegistry
 import com.androidmcp.core.registry.ToolRegistry
@@ -10,11 +14,16 @@ import kotlinx.serialization.json.*
  *
  * The dispatcher supports the stateless MCP 2026-07-28 core while retaining the
  * 2025-06-18 initialize path for deployed clients during migration.
+ *
+ * [toolAuthorizer] is optional so generic SDK consumers retain existing behavior. When an
+ * authorizer is installed, every tools/call must also carry a [ToolInvocationSecurityContext]
+ * supplied by a trusted transport; missing context fails closed before the handler is invoked.
  */
 class McpDispatcher(
     private val serverInfo: Implementation = Implementation("android-mcp-sdk", "0.2.0"),
     private val toolRegistry: ToolRegistry = ToolRegistry(),
     private val resourceRegistry: ResourceRegistry = ResourceRegistry(),
+    private val toolAuthorizer: ToolCallAuthorizer? = null,
     @Volatile var instructions: String? = null
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
@@ -25,8 +34,14 @@ class McpDispatcher(
     /**
      * Process a JSON-RPC request and return a response.
      * Returns null for legacy notifications (no id).
+     *
+     * [securityContext] must originate from the authenticated transport. Never construct it from
+     * MCP request _meta/clientInfo, which is self-reported client data.
      */
-    suspend fun dispatch(request: JsonRpcRequest): JsonRpcResponse? {
+    suspend fun dispatch(
+        request: JsonRpcRequest,
+        securityContext: ToolInvocationSecurityContext? = null,
+    ): JsonRpcResponse? {
         if (request.id == null) {
             handleNotification(request)
             return null
@@ -49,7 +64,7 @@ class McpDispatcher(
                 }
                 "ping" -> handlePing()
                 "tools/list" -> handleToolsList()
-                "tools/call" -> handleToolsCall(request, modern)
+                "tools/call" -> handleToolsCall(request, modern, securityContext)
                 "resources/list" -> handleResourcesList()
                 "resources/read" -> handleResourcesRead(request, modern)
                 else -> throw MethodNotFoundError(request.method)
@@ -73,10 +88,9 @@ class McpDispatcher(
     }
 
     private fun handleNotification(request: JsonRpcRequest) {
-        // Retained only for compatibility with initialize-era clients.
         when (request.method) {
-            "notifications/initialized" -> { /* client confirmed init */ }
-            "notifications/cancelled" -> { /* legacy client cancelled a request */ }
+            "notifications/initialized" -> { /* initialize-era client confirmed init */ }
+            "notifications/cancelled" -> { /* initialize-era client cancelled a request */ }
         }
     }
 
@@ -98,8 +112,6 @@ class McpDispatcher(
     }
 
     private fun handleInitialize(): JsonElement {
-        // initialize belongs to the legacy protocol era. Keep its public version stable
-        // while modern clients use server/discover and per-request metadata.
         val result = InitializeResult(
             protocolVersion = MCP_LEGACY_PROTOCOL_VERSION,
             capabilities = capabilities(),
@@ -120,7 +132,11 @@ class McpDispatcher(
         return json.encodeToJsonElement(result)
     }
 
-    private suspend fun handleToolsCall(request: JsonRpcRequest, modern: Boolean): JsonElement {
+    private suspend fun handleToolsCall(
+        request: JsonRpcRequest,
+        modern: Boolean,
+        securityContext: ToolInvocationSecurityContext?,
+    ): JsonElement {
         val params = request.params
             ?: throw InvalidParamsError("Missing params for tools/call")
         val callParams = json.decodeFromJsonElement<ToolCallParams>(params)
@@ -131,9 +147,45 @@ class McpDispatcher(
             throw MethodNotFoundError("Tool not found: ${callParams.name}")
         }
 
-        val result = tool.handler(callParams.arguments ?: buildJsonObject { })
+        val arguments = callParams.arguments ?: buildJsonObject { }
+        val authorizer = toolAuthorizer
+        if (authorizer != null) {
+            val trustedContext = securityContext
+                ?: return json.encodeToJsonElement(policyDeniedResult(
+                    "Tool authorization context is missing; refusing to execute ${callParams.name}"
+                ))
+
+            when (val outcome = authorizer.authorize(
+                ToolAuthorizationRequest(
+                    toolName = callParams.name,
+                    metadata = tool.metadata,
+                    arguments = arguments,
+                    inputResponses = callParams.inputResponses,
+                    requestState = callParams.requestState,
+                    securityContext = trustedContext,
+                    supportsInputRequired = modern,
+                )
+            )) {
+                ToolAuthorizationOutcome.Allow -> { /* execute below */ }
+                is ToolAuthorizationOutcome.Deny ->
+                    return json.encodeToJsonElement(policyDeniedResult(outcome.reason))
+                is ToolAuthorizationOutcome.InputRequired ->
+                    return json.encodeToJsonElement(outcome.result)
+            }
+        }
+
+        val result = tool.handler(arguments)
         return json.encodeToJsonElement(result)
     }
+
+    private fun policyDeniedResult(reason: String): ToolCallResult = ToolCallResult(
+        content = listOf(ContentBlock.text("Policy denied tool execution: $reason")),
+        structuredContent = buildJsonObject {
+            put("status", "denied")
+            put("reason", reason)
+        },
+        isError = true,
+    )
 
     private fun handleResourcesList(): JsonElement {
         val result = ResourcesListResult(
@@ -206,10 +258,7 @@ class McpDispatcher(
         put("io.modelcontextprotocol/serverInfo", json.encodeToJsonElement(serverInfo))
     }
 
-    /**
-     * Every modern successful result requires resultType. Server identity is repeated
-     * in _meta so requests remain self-describing without relying on discovery state.
-     */
+    /** Every modern successful result is self-describing and stamped with server identity. */
     private fun normalizeModernResult(result: JsonElement): JsonElement {
         val obj = result as? JsonObject ?: return result
         val existingMeta = obj["_meta"] as? JsonObject ?: JsonObject(emptyMap())
@@ -220,8 +269,6 @@ class McpDispatcher(
         return JsonObject(withResultType + ("_meta" to mergedMeta))
     }
 }
-
-// --- Error types ---
 
 open class McpError(
     val code: Int,
