@@ -27,8 +27,9 @@ import java.util.UUID
 /**
  * Builds Hub proxy handlers for installed CapApps.
  *
- * Binder v1 is preferred and returns results through an authenticated Binder callback. The v0
- * Intent/broadcast path is retained only for CapApps that have not migrated yet.
+ * Binder v1 is preferred and returns results through an authenticated Binder callback. Rich v1
+ * ToolMetadata is retained in the Hub registry for deterministic policy evaluation; legacy v0
+ * tools have null metadata and therefore receive conservative policy defaults.
  */
 class IntentToolRouter(private val context: Context) {
 
@@ -61,6 +62,7 @@ class IntentToolRouter(private val context: Context) {
                         outputSchema = tool.outputSchema,
                         annotations = tool.annotations,
                     ),
+                    metadata = app.toolMetadata[tool.name],
                     handler = proxyHandler,
                 ))
             }
