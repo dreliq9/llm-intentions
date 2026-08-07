@@ -5,11 +5,15 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.IBinder
 import android.util.Log
 import com.androidmcp.core.protocol.ToolInfo
 import com.androidmcp.intent.McpIntentConstants
+import com.androidmcp.intent.v1.ICapAppCallback
+import com.androidmcp.intent.v1.ICapAppService
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
@@ -18,10 +22,10 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Discovers apps that implement the MCP Intent protocol.
+ * Discovers installed CapApps.
  *
- * Scans for Services with ACTION_EXECUTE intent-filter and META_TOOL_APP metadata.
- * Fetches tool catalogs by sending LIST_TOOLS and listening for broadcast replies.
+ * Binder Protocol v1 is preferred. Already-deployed Intent Protocol v0 CapApps remain visible as
+ * a migration fallback, but a component discovered on v1 is never duplicated through v0.
  */
 class IntentAppDiscovery(private val context: Context) {
 
@@ -29,13 +33,20 @@ class IntentAppDiscovery(private val context: Context) {
     private val pendingCallbacks = ConcurrentHashMap<String, CompletableDeferred<List<ToolInfo>>>()
 
     fun discover(): List<DiscoveredApp> {
-        val services = findToolServices()
+        val v1Services = findToolServices(
+            action = McpIntentConstants.ACTION_BIND_V1,
+            requireProtocolV1 = true,
+        )
+        val v0Services = findToolServices(
+            action = McpIntentConstants.ACTION_EXECUTE,
+            requireProtocolV1 = false,
+        )
+
         val usedNamespaces = mutableSetOf<String>()
+        val claimedComponents = mutableSetOf<ComponentName>()
         val apps = mutableListOf<DiscoveredApp>()
 
-        for ((componentName, rawNamespace) in services) {
-            if (componentName.packageName == context.packageName) continue
-
+        fun uniqueNamespace(rawNamespace: String): String {
             var namespace = rawNamespace
             if (namespace in usedNamespaces) {
                 var counter = 2
@@ -43,60 +54,181 @@ class IntentAppDiscovery(private val context: Context) {
                 namespace = "$namespace$counter"
             }
             usedNamespaces.add(namespace)
+            return namespace
+        }
 
-            val tools = fetchToolsFromService(componentName)
+        for ((componentName, rawNamespace) in v1Services) {
+            if (componentName.packageName == context.packageName) continue
 
+            val tools = fetchToolsFromBinderService(componentName)
             if (tools.isNotEmpty()) {
+                claimedComponents.add(componentName)
                 apps.add(DiscoveredApp(
                     packageName = componentName.packageName,
                     serviceComponent = componentName,
-                    namespace = namespace,
-                    tools = tools
+                    namespace = uniqueNamespace(rawNamespace),
+                    tools = tools,
+                    transport = CapAppTransport.BINDER_V1,
                 ))
             }
         }
 
-        Log.i(TAG, "Discovered ${apps.size} tool apps with ${apps.sumOf { it.tools.size }} total tools")
+        for ((componentName, rawNamespace) in v0Services) {
+            if (componentName.packageName == context.packageName) continue
+            if (componentName in claimedComponents) continue
+
+            val tools = fetchToolsFromLegacyService(componentName)
+            if (tools.isNotEmpty()) {
+                apps.add(DiscoveredApp(
+                    packageName = componentName.packageName,
+                    serviceComponent = componentName,
+                    namespace = uniqueNamespace(rawNamespace),
+                    tools = tools,
+                    transport = CapAppTransport.INTENT_V0,
+                ))
+            }
+        }
+
+        val v1Count = apps.count { it.transport == CapAppTransport.BINDER_V1 }
+        Log.i(
+            TAG,
+            "Discovered ${apps.size} CapApps (${v1Count} Binder v1) with ${apps.sumOf { it.tools.size }} tools",
+        )
         return apps
     }
 
-    private fun findToolServices(): List<Pair<ComponentName, String>> {
+    private fun findToolServices(
+        action: String,
+        requireProtocolV1: Boolean,
+    ): List<Pair<ComponentName, String>> {
         val results = mutableListOf<Pair<ComponentName, String>>()
-        val pm = context.packageManager
-
-        val intent = Intent(McpIntentConstants.ACTION_EXECUTE)
-        val resolvedServices = pm.queryIntentServices(intent, PackageManager.GET_META_DATA)
+        val intent = Intent(action)
+        val resolvedServices = context.packageManager.queryIntentServices(intent, PackageManager.GET_META_DATA)
 
         for (resolveInfo in resolvedServices) {
             val serviceInfo = resolveInfo.serviceInfo ?: continue
             val meta = serviceInfo.metaData ?: continue
 
             val isToolApp = meta.getBoolean(McpIntentConstants.META_TOOL_APP, false) ||
-                    meta.getString(McpIntentConstants.META_TOOL_APP) == "true"
+                meta.getString(McpIntentConstants.META_TOOL_APP) == "true"
+            if (!isToolApp) continue
 
-            if (isToolApp) {
-                val namespace = meta.getString(McpIntentConstants.META_NAMESPACE)
-                    ?: serviceInfo.packageName.substringAfterLast('.')
-                val component = ComponentName(serviceInfo.packageName, serviceInfo.name)
-                results.add(component to namespace)
-            }
+            val protocolVersion = meta.getInt(
+                McpIntentConstants.META_PROTOCOL_VERSION,
+                McpIntentConstants.CAPAPP_PROTOCOL_V0,
+            )
+            if (requireProtocolV1 && protocolVersion < McpIntentConstants.CAPAPP_PROTOCOL_V1) continue
+
+            val namespace = meta.getString(McpIntentConstants.META_NAMESPACE)
+                ?: serviceInfo.packageName.substringAfterLast('.')
+            results.add(ComponentName(serviceInfo.packageName, serviceInfo.name) to namespace)
         }
 
         return results
     }
 
-    /**
-     * Send LIST_TOOLS to a service and await the broadcast reply.
-     */
-    private fun fetchToolsFromService(component: ComponentName): List<ToolInfo> {
+    /** Bind to a v1 service, authenticate through Binder, and fetch its in-memory tool catalog. */
+    private fun fetchToolsFromBinderService(component: ComponentName): List<ToolInfo> {
         return try {
             runBlocking {
-                withTimeoutOrNull(5_000) {
+                withTimeoutOrNull(BINDER_DISCOVERY_TIMEOUT_MS) {
+                    val serviceDeferred = CompletableDeferred<ICapAppService>()
+                    val toolsDeferred = CompletableDeferred<List<ToolInfo>>()
+
+                    val connection = object : ServiceConnection {
+                        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                            val service = binder?.let(ICapAppService.Stub::asInterface)
+                            if (service != null) serviceDeferred.complete(service)
+                            else serviceDeferred.completeExceptionally(
+                                IllegalStateException("Null Binder interface from $component")
+                            )
+                        }
+
+                        override fun onServiceDisconnected(name: ComponentName?) {
+                            if (!serviceDeferred.isCompleted) {
+                                serviceDeferred.completeExceptionally(
+                                    IllegalStateException("Service disconnected before binding: $component")
+                                )
+                            }
+                        }
+
+                        override fun onNullBinding(name: ComponentName?) {
+                            if (!serviceDeferred.isCompleted) {
+                                serviceDeferred.completeExceptionally(
+                                    IllegalStateException("Null binding from $component")
+                                )
+                            }
+                        }
+
+                        override fun onBindingDied(name: ComponentName?) {
+                            if (!serviceDeferred.isCompleted) {
+                                serviceDeferred.completeExceptionally(
+                                    IllegalStateException("Binding died for $component")
+                                )
+                            }
+                        }
+                    }
+
+                    val bindIntent = Intent(McpIntentConstants.ACTION_BIND_V1).apply {
+                        this.component = component
+                    }
+                    val bound = context.bindService(bindIntent, connection, Context.BIND_AUTO_CREATE)
+                    if (!bound) return@withTimeoutOrNull emptyList()
+
+                    try {
+                        val service = serviceDeferred.await()
+                        // This small authenticated call also proves the Binder surface is v1.
+                        service.descriptorJson
+
+                        val callback = object : ICapAppCallback.Stub() {
+                            override fun onTools(toolsJson: String?) {
+                                if (toolsDeferred.isCompleted) return
+                                val tools = if (toolsJson != null) {
+                                    try {
+                                        json.decodeFromString<List<ToolInfo>>(toolsJson)
+                                    } catch (e: Exception) {
+                                        Log.w(TAG, "Failed to parse Binder tools from ${component.packageName}", e)
+                                        emptyList()
+                                    }
+                                } else emptyList()
+                                toolsDeferred.complete(tools)
+                            }
+
+                            override fun onResult(requestId: String?, resultJson: String?) = Unit
+
+                            override fun onError(requestId: String?, code: Int, message: String?) {
+                                if (!toolsDeferred.isCompleted) {
+                                    Log.w(TAG, "Binder discovery error from $component: $code $message")
+                                    toolsDeferred.complete(emptyList())
+                                }
+                            }
+                        }
+
+                        service.listTools(callback)
+                        toolsDeferred.await()
+                    } finally {
+                        try { context.unbindService(connection) } catch (_: Exception) { }
+                    }
+                } ?: emptyList()
+            }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Binder CapApp rejected Hub identity for ${component.packageName}: ${e.message}")
+            emptyList()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed Binder discovery for ${component.packageName}: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** Send legacy LIST_TOOLS to a v0 service and await its broadcast reply. */
+    private fun fetchToolsFromLegacyService(component: ComponentName): List<ToolInfo> {
+        return try {
+            runBlocking {
+                withTimeoutOrNull(LEGACY_DISCOVERY_TIMEOUT_MS) {
                     val callbackId = UUID.randomUUID().toString()
                     val deferred = CompletableDeferred<List<ToolInfo>>()
                     pendingCallbacks[callbackId] = deferred
 
-                    // Register receiver for the reply
                     val receiver = object : BroadcastReceiver() {
                         override fun onReceive(ctx: Context, intent: Intent) {
                             val id = intent.getStringExtra(McpIntentConstants.EXTRA_CALLBACK_ID)
@@ -107,13 +239,13 @@ class IntentAppDiscovery(private val context: Context) {
                                 try {
                                     json.decodeFromString<List<ToolInfo>>(toolsJson)
                                 } catch (e: Exception) {
-                                    Log.w(TAG, "Failed to parse tools from ${component.packageName}", e)
+                                    Log.w(TAG, "Failed to parse legacy tools from ${component.packageName}", e)
                                     emptyList()
                                 }
                             } else emptyList()
 
                             pendingCallbacks.remove(callbackId)?.complete(tools)
-                            try { context.unregisterReceiver(this) } catch (_: Exception) {}
+                            try { context.unregisterReceiver(this) } catch (_: Exception) { }
                         }
                     }
 
@@ -124,7 +256,6 @@ class IntentAppDiscovery(private val context: Context) {
                         context.registerReceiver(receiver, filter)
                     }
 
-                    // Send LIST_TOOLS to the service
                     val intent = Intent(McpIntentConstants.ACTION_LIST_TOOLS).apply {
                         this.component = component
                         putExtra(McpIntentConstants.EXTRA_CALLBACK_ID, callbackId)
@@ -133,17 +264,19 @@ class IntentAppDiscovery(private val context: Context) {
                     context.startService(intent)
 
                     val result = deferred.await()
-                    try { context.unregisterReceiver(receiver) } catch (_: Exception) {}
+                    try { context.unregisterReceiver(receiver) } catch (_: Exception) { }
                     result
                 } ?: emptyList()
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to fetch tools from ${component.packageName}: ${e.message}")
+            Log.w(TAG, "Failed legacy discovery from ${component.packageName}: ${e.message}")
             emptyList()
         }
     }
 
     companion object {
         private const val TAG = "MCP-IntentDiscovery"
+        private const val BINDER_DISCOVERY_TIMEOUT_MS = 5_000L
+        private const val LEGACY_DISCOVERY_TIMEOUT_MS = 5_000L
     }
 }
