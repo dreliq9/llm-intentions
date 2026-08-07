@@ -398,7 +398,7 @@ mod tests {
     }
 
     fn spki_b64(signing_key: &SigningKey) -> String {
-        let point = signing_key.verifying_key().to_encoded_point(false);
+        let point = signing_key.verifying_key().to_sec1_point(false);
         let public_key = PublicKey::from_sec1_bytes(point.as_bytes()).expect("public key");
         URL_SAFE_NO_PAD.encode(
             public_key
