@@ -21,30 +21,23 @@
             </intent-filter>
         </activity>
 
-        <!-- MCP Intent Service — discoverable by Hub via Intent protocol -->
         <service
             android:name=".tools.TaichiToolService"
             android:exported="true">
             <intent-filter>
-                <action android:name="com.androidmcp.tool.EXECUTE" />
-                <action android:name="com.androidmcp.tool.LIST_TOOLS" />
+                <action android:name="com.androidmcp.capapp.BIND_V1" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
-            <meta-data
-                android:name="com.androidmcp.TOOL_APP"
-                android:value="true" />
-            <meta-data
-                android:name="com.androidmcp.NAMESPACE"
-                android:value="taichi" />
+            <meta-data android:name="com.androidmcp.TOOL_APP" android:value="true" />
+            <meta-data android:name="com.androidmcp.NAMESPACE" android:value="taichi" />
+            <meta-data android:name="com.androidmcp.PROTOCOL_VERSION" android:value="1" />
         </service>
 
-        <!-- Foreground service to keep Taichi alive when backgrounded -->
         <service
             android:name=".TaichiKeepAliveService"
             android:exported="false"
             android:foregroundServiceType="specialUse" />
 
-        <!-- Auto-start on boot -->
         <receiver
             android:name=".BootReceiver"
             android:exported="true">
