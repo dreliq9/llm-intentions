@@ -1,144 +1,126 @@
-# Task Plan: 4 Companion Tool Apps for LLM Intentions
+# LLM Intentions — Trusted Capability Platform Plan
 
 ## Goal
-Build 4 Android tool apps that extend `ToolAppService` and are discoverable by LLM Intentions Hub via the broadcast Intent protocol. These are the launch apps for the Play Store.
 
----
+Turn the deployed Android CapApp prototype into a capability substrate that can safely serve local agents first and ordinary consumer chat providers later.
 
-## Phase 1: Device Tool App (`tool-device`)
-**Namespace:** `device`
-**Permissions:** None required
-**Priority:** Build first — zero friction, immediate value
+The phone remains the final authority. Network reachability, MCP annotations, model intent, and relay connectivity are never substitutes for Android IPC trust or user authorization.
 
-### Tools (15):
-| Tool | API | Silent |
-|------|-----|--------|
-| `battery_status` | BatteryManager sticky broadcast | Yes |
-| `device_info` | Build.MODEL, VERSION, etc. | Yes |
-| `storage_info` | StatFs for free/total storage | Yes |
-| `memory_info` | ActivityManager.MemoryInfo | Yes |
-| `clipboard_read` | ClipboardManager.getPrimaryClip() | Yes (toast on 12+) |
-| `clipboard_write` | ClipboardManager.setPrimaryClip() | Yes |
-| `flashlight_on` | CameraManager.setTorchMode(true) | Yes |
-| `flashlight_off` | CameraManager.setTorchMode(false) | Yes |
-| `vibrate` | Vibrator.vibrate(VibrationEffect) | Yes |
-| `volume_get` | AudioManager.getStreamVolume() | Yes |
-| `volume_set` | AudioManager.setStreamVolume() | Yes |
-| `ringer_mode` | AudioManager.getRingerMode/setRingerMode | Yes |
-| `screen_brightness` | Settings.System.SCREEN_BRIGHTNESS | Yes (read) / needs WRITE_SETTINGS (set) |
-| `tts_speak` | TextToSpeech.speak() | Yes (plays audio) |
-| `sensor_read` | SensorManager — accel, gyro, compass, light, pressure, proximity | Yes |
+## H0 — Harden local Hub transport + modernize MCP
 
-### Files to create:
-- `tool-device/build.gradle.kts`
-- `tool-device/src/main/AndroidManifest.xml`
-- `tool-device/src/main/kotlin/com/llmintentions/device/DeviceToolService.kt`
-- `tool-device/src/main/kotlin/com/llmintentions/device/DeviceActivity.kt` (minimal launcher)
+Status: implemented on `agent/trusted-modern-mcp` / PR #2; code/CI green, physical-device smoke test pending.
 
-### Status: [ ] Not started
+- bind MCP server to loopback only;
+- authenticate localhost with app-private bearer token;
+- support immediate local-token rotation/revocation;
+- validate Origin and harden raw HTTP parsing/bounds;
+- add current MCP `2026-07-28` stateless compatibility while keeping deployed initialize-era compatibility temporarily;
+- add deterministic list order/cache hints and baseline CI.
 
----
+Exit proof on device:
+- valid copied local config connects;
+- missing/wrong bearer is rejected;
+- rotated credential immediately invalidates old config.
 
-## Phase 2: Contacts + Calendar Tool App (`tool-people`)
-**Namespace:** `people`
-**Permissions:** READ_CONTACTS, WRITE_CONTACTS, READ_CALENDAR, WRITE_CALENDAR
-**Priority:** Second — universal appeal, standard permissions
+## H1 — Trusted CapApp IPC
 
-### Tools (12):
-| Tool | API | Silent |
-|------|-----|--------|
-| `contacts_search` | ContactsContract query by name/number | Yes |
-| `contacts_list` | ContactsContract.Contacts query (paginated) | Yes |
-| `contact_details` | ContactsContract.Data query by ID | Yes |
-| `contact_add` | ContentResolver.insert(RawContacts + Data) | Yes |
-| `contact_delete` | ContentResolver.delete(contactUri) | Yes |
-| `calendar_events` | CalendarContract.Events query (date range) | Yes |
-| `calendar_today` | CalendarContract.Events query (today) | Yes |
-| `event_create` | ContentResolver.insert(Events) | Yes |
-| `event_update` | ContentResolver.update(eventUri) | Yes |
-| `event_delete` | ContentResolver.delete(eventUri) | Yes |
-| `calendars_list` | CalendarContract.Calendars query | Yes |
-| `set_alarm` | AlarmClock.ACTION_SET_ALARM + SKIP_UI | Yes |
+Status: implemented on `agent/trusted-capapp-ipc` / PR #3; full bundled APK build green, physical signing/trust smoke test pending.
 
-### Files to create:
-- `tool-people/build.gradle.kts`
-- `tool-people/src/main/AndroidManifest.xml`
-- `tool-people/src/main/kotlin/com/llmintentions/people/PeopleToolService.kt`
-- `tool-people/src/main/kotlin/com/llmintentions/people/PeopleActivity.kt` (permission request UI)
+- replace privileged started-service execution with Binder/AIDL v1;
+- authenticate the Binder caller before leaving the calling thread;
+- current first-party policy requires exact Hub package + matching Android signer;
+- results return by Binder callback, not caller-selected broadcast package;
+- SDK v0 execution fails closed unless explicitly re-enabled for migration;
+- Hub prefers v1 but can still discover older installed v0 APKs during rollout;
+- migrate all bundled rebuilt CapApps to Binder v1;
+- make health checks and Hub UI transport-aware.
 
-### Status: [ ] Not started
+Exit proof on device:
+- bundled v1 providers appear healthy;
+- harmless Hub→CapApp calls work;
+- unrelated APK cannot bind/invoke successfully;
+- old v0 APK remains visible only as the explicit compatibility path.
 
----
+## H2 — Deterministic policy + MCP consent
 
-## Phase 3: Files Tool App (`tool-files`)
-**Namespace:** `files`
-**Permissions:** READ_MEDIA_IMAGES, READ_MEDIA_VIDEO, READ_MEDIA_AUDIO (Android 13+) or READ_EXTERNAL_STORAGE (older)
-**Priority:** Third — Claude needs file access
+Status: implemented on `agent/policy-consent` / PR #4. Full `:mcp-core:test` and Hub/SDK/all bundled CapApp assembly passed on code head `76182520d6e4a831f6c3757015b4684e5949171c`; final documentation-only head is being revalidated.
 
-### Tools (10):
-| Tool | API | Silent |
-|------|-----|--------|
-| `app_files_list` | context.filesDir listing | Yes |
-| `app_file_read` | Read from filesDir/cacheDir | Yes |
-| `app_file_write` | Write to filesDir | Yes |
-| `app_file_delete` | Delete from filesDir | Yes |
-| `media_images` | MediaStore.Images query (recent, by name) | Yes |
-| `media_videos` | MediaStore.Video query | Yes |
-| `media_audio` | MediaStore.Audio query | Yes |
-| `downloads_list` | MediaStore.Downloads query (Android 10+) | Yes |
-| `download_file` | DownloadManager.enqueue() | Yes |
-| `file_info` | ContentResolver metadata for any content:// URI | Yes |
+- explicit mutation, sensitivity, confirmation, idempotence and latency semantics;
+- authenticated rich CapApp descriptors preserve policy metadata to Hub;
+- older descriptors become conservative `UNKNOWN`, never optimistic read-only;
+- shared `McpDispatcher` authorizer gates Hub-native and proxied tools before handler execution;
+- caller identity comes only from trusted transport context, never MCP `_meta`;
+- remote providers require persisted principal/tool grants;
+- deterministic policy:
+  - no grant → deny;
+  - credentials → deny remotely by default;
+  - unknown metadata → confirm;
+  - mutation/destructive → confirm;
+  - sensitive read → confirm;
+  - granted known read-only non-sensitive → allow;
+- MCP `input_required` confirmation for modern clients;
+- HMAC-bound request state tied to principal/tool/arguments/expiry/nonce;
+- one-use, bounded pending confirmation store; replay/expiry/eviction/restart fail closed;
+- app-private rolling authorization audit that omits arguments/results/confirmation contents.
 
-### Files to create:
-- `tool-files/build.gradle.kts`
-- `tool-files/src/main/AndroidManifest.xml`
-- `tool-files/src/main/kotlin/com/llmintentions/files/FilesToolService.kt`
-- `tool-files/src/main/kotlin/com/llmintentions/files/FilesActivity.kt` (permission request UI)
+Exit proof on device:
+- authenticated localhost development still works;
+- synthetic `REMOTE_PROVIDER` without grant is denied;
+- granted safe read executes;
+- confirmation-required synthetic call does not execute before approval;
+- approved retry executes once; replay fails.
 
-### Status: [ ] Not started
+## H3 — Outbound authenticated Intentions Relay
 
----
+Status: next implementation slice. No pushed relay branch existed when H3 began; build cleanly from final H2.
 
-## Phase 4: Notifications Tool App (`tool-notify`)
-**Namespace:** `notify`
-**Permissions:** NotificationListenerService (special Settings toggle)
-**Priority:** Fourth — premium feature, killer capability
+### Relay trust model
 
-### Tools (8):
-| Tool | API | Silent |
-|------|-----|--------|
-| `notifications_list` | NotificationListenerService.getActiveNotifications() | Yes |
-| `notification_details` | Parse notification key → extras, text, actions | Yes |
-| `notification_dismiss` | cancelNotification(key) | Yes |
-| `notification_dismiss_all` | cancelAllNotifications() | Yes |
-| `notification_reply` | Extract RemoteInput from action, send reply | Yes |
-| `notification_history` | In-memory log of recent notifications (last 100) | Yes |
-| `notification_filter` | Search notifications by app/text/time | Yes |
-| `notification_watch` | Toggle persistent monitoring, store to history | Yes |
+- Rust relay service;
+- no listener by default unless explicitly configured;
+- public TLS only;
+- device enrollment is explicit, one-time, expiring, and revocable;
+- Android device holds a P-256 signing key in Android Keystore;
+- enrollment proves possession of the submitted device public key;
+- relay authentication uses fresh one-use challenges and ECDSA signatures;
+- connection is phone-outbound only;
+- bounded frame sizes, bounded in-flight work, absolute deadlines;
+- no offline device-action queue;
+- device disconnect/session replacement fails pending work rather than replaying later.
 
-### Files to create:
-- `tool-notify/build.gradle.kts`
-- `tool-notify/src/main/AndroidManifest.xml`
-- `tool-notify/src/main/kotlin/com/llmintentions/notify/NotifyToolService.kt`
-- `tool-notify/src/main/kotlin/com/llmintentions/notify/NotifyListenerService.kt`
-- `tool-notify/src/main/kotlin/com/llmintentions/notify/NotifyActivity.kt` (Settings toggle guide)
-- `tool-notify/src/main/res/xml/notification_listener.xml` (service config)
+### Android client
 
-### Status: [ ] Not started
+- attach relay connection lifetime to the existing Hub foreground service;
+- require an enrolled relay configuration and explicit enablement;
+- use `wss://` and disable cleartext traffic;
+- reconnect with bounded exponential backoff/jitter;
+- authenticate each new session with the Keystore device key;
+- parse only typed/bounded relay frames;
+- translate relay-verified provider identity into `ToolInvocationSecurityContext(REMOTE_PROVIDER, principalId)`;
+- dispatch through the same H2 `McpDispatcher` authorizer;
+- never let relay payload `_meta` replace the transport-authenticated principal.
 
----
+### Initial public surface
 
-## Phase 5: Integration + Launch Prep
-- [ ] Add all 4 modules to settings.gradle.kts
-- [ ] Verify Hub discovers all apps simultaneously
-- [ ] Test tool calls through Hub → Claude Code for each app
-- [ ] Build release APKs
-- [ ] Play Store listings (screenshots, descriptions)
+Before sensitive CapApps are remotely usable:
+- expose synthetic harmless test operations only;
+- prove device auth, routing, grant denial, safe-read allow, MRTR confirmation and replay rejection end-to-end;
+- only then begin granting selected real tools.
 
----
+## H4 — Consumer provider onboarding
 
-## Decisions
-- **textTool helper:** Move from Taichi's companion object into `mcp-intent-api` as a public extension so all tool apps can use it
-- **Package naming:** `com.llmintentions.device`, `com.llmintentions.people`, `com.llmintentions.files`, `com.llmintentions.notify`
-- **Activity pattern:** Each app gets a minimal Activity that requests permissions (if needed) and shows status. No Activity needed for tool-device since it has zero permissions.
-- **Sensor reads:** Use a one-shot pattern — register listener, get one reading, unregister. Don't leave sensors running.
+- authenticated user/account control plane;
+- provider-specific MCP/connect flows;
+- user-facing Connect Assistant / revoke UI;
+- policy presets such as Read only / Ask before changes;
+- per-provider/per-tool grant management;
+- device/relation recovery and revocation.
+
+## H5 — Capability expansion
+
+After H0-H4 trust boundaries are proven:
+- typed/structured tool outputs and schemas across more CapApps;
+- broader semantic CapApps;
+- optional UI/accessibility automation as a fallback capability, not the platform identity;
+- third-party CapApp pairing/trust beyond first-party shared signing;
+- revisit Intent Mesh after the secure capability substrate is stable.

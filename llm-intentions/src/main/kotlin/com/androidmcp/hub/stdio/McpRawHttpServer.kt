@@ -1,6 +1,8 @@
 package com.androidmcp.hub.stdio
 
 import android.util.Log
+import com.androidmcp.core.policy.InvocationOrigin
+import com.androidmcp.core.policy.ToolInvocationSecurityContext
 import com.androidmcp.core.protocol.JsonRpcError
 import com.androidmcp.core.protocol.JsonRpcRequest
 import com.androidmcp.core.protocol.JsonRpcResponse
@@ -33,6 +35,7 @@ import java.nio.charset.CodingErrorAction
  * - Bind loopback only. Remote access belongs behind the authenticated relay.
  * - Require an app-private bearer credential even on loopback; localhost is not caller identity.
  * - Resolve the expected bearer credential per request so rotation revokes prior configs instantly.
+ * - Create the LOCAL_DEVELOPER security context only after this transport authenticates the bearer.
  * - Validate browser Origin to block DNS rebinding.
  * - Parse Content-Length as bytes, not decoded characters.
  * - Bound header/body sizes and reject unsupported transfer encodings.
@@ -280,7 +283,7 @@ internal class McpRawHttpServer(
 
             if (request.id == null) {
                 try {
-                    engine.dispatcher.dispatch(request)
+                    engine.dispatcher.dispatch(request, LOCAL_DEVELOPER_CONTEXT)
                 } catch (e: Exception) {
                     Log.w(TAG, "Notification dispatch failed (non-fatal)", e)
                 }
@@ -288,7 +291,7 @@ internal class McpRawHttpServer(
             }
 
             val response = try {
-                engine.dispatcher.dispatch(request)
+                engine.dispatcher.dispatch(request, LOCAL_DEVELOPER_CONTEXT)
             } catch (e: Exception) {
                 Log.e(TAG, "Dispatch failed for ${request.method}", e)
                 JsonRpcResponse(
@@ -443,6 +446,11 @@ internal class McpRawHttpServer(
         private const val SOCKET_TIMEOUT_MS = 30_000
         private const val MAX_HEADER_BYTES = 32 * 1024
         private const val MAX_REQUEST_BODY_BYTES = 1_048_576L
+
+        private val LOCAL_DEVELOPER_CONTEXT = ToolInvocationSecurityContext(
+            origin = InvocationOrigin.LOCAL_DEVELOPER,
+            principalId = "local:developer",
+        )
 
         private val HEADER_NAME = Regex("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
         private val SINGLETON_HEADERS = setOf(

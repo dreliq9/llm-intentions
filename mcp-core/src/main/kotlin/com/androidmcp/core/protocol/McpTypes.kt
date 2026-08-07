@@ -3,21 +3,18 @@ package com.androidmcp.core.protocol
 import kotlinx.serialization.*
 import kotlinx.serialization.json.*
 
-/**
- * Historical public constant retained for source compatibility with deployed code.
- * initialize-era clients use this version.
- */
+/** Historical initialize-era public constant retained for source compatibility. */
 const val MCP_PROTOCOL_VERSION = "2025-06-18"
 
 /** Current stateless MCP protocol version. */
 const val MCP_MODERN_PROTOCOL_VERSION = "2026-07-28"
 
-/** Explicit alias for code that wants to name the compatibility era. */
 const val MCP_LEGACY_PROTOCOL_VERSION = MCP_PROTOCOL_VERSION
 
 val SUPPORTED_MCP_PROTOCOL_VERSIONS = listOf(MCP_MODERN_PROTOCOL_VERSION, MCP_LEGACY_PROTOCOL_VERSION)
 
 const val MCP_RESULT_COMPLETE = "complete"
+const val MCP_RESULT_INPUT_REQUIRED = "input_required"
 const val MCP_CACHE_SCOPE_PRIVATE = "private"
 const val MCP_CACHE_SCOPE_PUBLIC = "public"
 
@@ -92,10 +89,7 @@ data class Implementation(
 
 // --- Tools ---
 
-/**
- * Tool annotations describing behavior to clients (advisory; clients should
- * not rely on these for security-critical decisions).
- */
+/** Tool annotations are advisory client hints, never a security authorization source. */
 @Serializable
 data class ToolAnnotations(
     val title: String? = null,
@@ -133,12 +127,36 @@ data class ToolCallParams(
 )
 
 /**
+ * MCP 2026-07-28 mid-request input requirement. Each value in [inputRequests] is a normal MCP
+ * request object, such as `elicitation/create`. The client retries the original tool call with
+ * inputResponses and the byte-exact requestState after resolving these requests.
+ */
+@Serializable
+data class InputRequiredResult(
+    val resultType: String = MCP_RESULT_INPUT_REQUIRED,
+    val inputRequests: Map<String, InputRequest>,
+    val requestState: String? = null,
+)
+
+@Serializable
+data class InputRequest(
+    val method: String,
+    val params: JsonObject,
+)
+
+/** Subset of elicitation/create response fields needed by deterministic policy confirmation. */
+@Serializable
+data class ElicitResult(
+    val action: String,
+    val content: JsonObject? = null,
+)
+
+/**
  * Tool result payload.
  *
- * - [content]: human-readable text/image/resource blocks (always present).
+ * - [content]: human-readable text/image/resource blocks.
  * - [structuredContent]: arbitrary JSON that conforms to outputSchema when present.
- * - [isError]: true if the tool failed; clients should surface this rather
- *   than treating the response as success.
+ * - [isError]: true if the tool failed.
  */
 @Serializable
 data class ToolCallResult(
@@ -160,10 +178,6 @@ data class ContentBlock(
 
 // --- Resources ---
 
-/**
- * A discoverable resource the server exposes for clients to read.
- * Resources are state to read rather than actions to take.
- */
 @Serializable
 data class Resource(
     val uri: String,
@@ -203,10 +217,6 @@ data class ReadResourceResult(
     val cacheScope: String = MCP_CACHE_SCOPE_PRIVATE,
 )
 
-/**
- * Contents returned by resources/read. Either [text] or [blob] is set,
- * never both. [blob] is base64-encoded when present.
- */
 @Serializable
 data class ResourceContents(
     val uri: String,

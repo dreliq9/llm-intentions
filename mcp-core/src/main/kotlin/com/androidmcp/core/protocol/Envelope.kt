@@ -56,11 +56,6 @@ data class Envelope(
         fun fail(summary: String, hint: String = "", data: JsonObject = JsonObject(emptyMap()), raw: JsonObject = JsonObject(emptyMap())) =
             Envelope(EnvelopeStatus.FAIL, summary, hint, data, raw)
 
-        /**
-         * Convert a thrown exception into a FAIL envelope, consulting the tool's
-         * metadata.failureModes for an actionable hint. Patterns regex-match against the
-         * exception message; exceptionType matches against simple class name or canonical name.
-         */
         fun fromException(toolName: String, metadata: ToolMetadata?, exception: Throwable): Envelope {
             val message = exception.message ?: exception.javaClass.simpleName
             val hint = metadata?.let { matchFailureMode(it, exception) } ?: ""
@@ -88,8 +83,46 @@ data class Envelope(
     }
 }
 
-// ---- Rich tool metadata (stub types; DSL builder added in a later task). ----
+/**
+ * Whether a tool changes state. UNKNOWN is intentionally the default so missing metadata does not
+ * silently become read-only authorization.
+ */
+@Serializable
+enum class MutationClass {
+    READ_ONLY,
+    MUTATING,
+    UNKNOWN,
+}
 
+/**
+ * Broadest data class a tool may read, return, create, or transmit. This is policy metadata, not a
+ * claim that the tool always returns that data on every call.
+ */
+@Serializable
+enum class SensitiveDataClass {
+    NONE,
+    DEVICE,
+    PERSONAL,
+    COMMUNICATIONS,
+    FINANCIAL,
+    CREDENTIALS,
+    UNKNOWN,
+}
+
+/** Static author intent for confirmation. Deterministic Hub policy can always be stricter. */
+@Serializable
+enum class ConfirmationMode {
+    NEVER,
+    POLICY,
+    ALWAYS,
+}
+
+/**
+ * Rich LLM Intentions tool metadata.
+ *
+ * Safety fields default conservatively. Existing serialized descriptors remain decodable because
+ * every new property has a default value.
+ */
 @Serializable
 data class ToolMetadata(
     val examples: List<ToolExample> = emptyList(),
@@ -98,6 +131,10 @@ data class ToolMetadata(
     val idempotent: Boolean = true,
     val latencyClass: LatencyClass = LatencyClass.FAST,
     val failureModes: List<FailureMode> = emptyList(),
+    val mutation: MutationClass = MutationClass.UNKNOWN,
+    val sensitiveData: SensitiveDataClass = SensitiveDataClass.UNKNOWN,
+    val confirmation: ConfirmationMode = ConfirmationMode.POLICY,
+    val openWorld: Boolean? = null,
 )
 
 @Serializable

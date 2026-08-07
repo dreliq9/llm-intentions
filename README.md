@@ -2,7 +2,7 @@
 
 > An Android capability substrate for AI assistants: installable CapApps, a local Hub, and a model-independent MCP surface.
 
-**Status: Alpha** — deployed on real Android hardware. The Hub and bundled CapApps are being hardened for use beyond CLI agents.
+**Status: Alpha** — deployed on real Android hardware. H0 local transport hardening, H1 authenticated Binder CapApp IPC, and the H2 deterministic policy/consent code path are implemented on stacked branches; installed-device smoke tests remain before remote consumer access is enabled.
 
 ## What is this?
 
@@ -41,7 +41,7 @@ The Android Hub's developer MCP endpoint:
 - binds to `127.0.0.1` only;
 - is **not** exposed on Wi‑Fi/LAN by default;
 - requires an app-private bearer token even on localhost;
-- supports immediate bearer-token rotation/revocation from the Hub UI;
+- supports immediate token rotation/revocation from the Hub UI;
 - validates browser `Origin` values;
 - bounds and byte-parses HTTP requests;
 - supports MCP `2026-07-28` stateless request semantics while retaining an initialize-era compatibility path.
@@ -50,13 +50,32 @@ Loopback is intentionally not treated as caller identity: another installed Andr
 
 ### CapApp IPC
 
-**Bundled rebuilt CapApps now use CapApp Protocol v1**, an authenticated Binder/AIDL transport. Every Binder transaction verifies the official Hub package identity and matching signer before capability work begins, and results return over Binder callbacks rather than a caller-selected broadcast target.
+Bundled rebuilt CapApps advertise **CapApp Protocol v1** and use authenticated Binder/AIDL calls. The Hub verifies each CapApp transport and routes v1 calls over Binder. The SDK makes the old started-service/broadcast v0 execution path fail closed by default.
 
-The Hub retains the original started-service/broadcast v0 path only as a migration fallback for older already-installed CapApp APKs. New `ToolAppService` subclasses fail closed: v0 execution is disabled unless explicitly opted into.
+For the current first-party build, a CapApp accepts the Hub only when the caller is the exact Hub package (`com.llmintentions`) **and** Android reports a matching signing identity. Older already-installed v0 CapApps remain discoverable through a Hub compatibility fallback during migration.
 
-Remote relay access should remain disabled for sensitive user data until the Hub-side policy/consent layer is in place and the Binder path has passed installed-device security testing.
+### Tool policy and consent
 
-See [`spec/capapp-protocol.md`](spec/capapp-protocol.md) and [`docs/superpowers/specs/2026-08-06-trusted-consumer-access.md`](docs/superpowers/specs/2026-08-06-trusted-consumer-access.md).
+The Hub installs a deterministic authorization gate at the shared MCP dispatcher before any `tools/call` handler runs. Rich CapApp policy metadata survives authenticated Binder discovery into the Hub registry.
+
+For future remote-provider calls the default policy is conservative:
+
+- no persisted principal/tool grant → deny;
+- credential-bearing tool → deny by default;
+- unknown safety metadata → require confirmation;
+- mutating/destructive operation → require confirmation;
+- sensitive read → require confirmation;
+- explicitly granted, read-only, non-sensitive tool → allow.
+
+Confirmation uses MCP `2026-07-28` `input_required`: the handler is not called until the user approves the exact invocation. Opaque confirmation state is HMAC-bound to the authenticated principal, tool, canonical argument hash, expiry, and a one-use nonce. Pending confirmation state is bounded in memory and disappears on Hub restart, so stale, replayed, evicted, or tampered approvals fail closed.
+
+The Hub keeps a small app-private rolling **authorization** audit log containing only timestamp, authenticated principal/origin, tool name, authorization outcome, and generic reason. It does not log tool arguments, outputs, signed request state, or elicitation contents.
+
+Authenticated localhost development remains an explicit `LOCAL_DEVELOPER` path while remote providers must enter as a transport-authenticated `REMOTE_PROVIDER` principal.
+
+Remote relay access remains disabled until the outbound relay/device enrollment path is implemented and tested.
+
+See [`docs/superpowers/specs/2026-08-06-trusted-consumer-access.md`](docs/superpowers/specs/2026-08-06-trusted-consumer-access.md) and [`docs/security/policy-consent.md`](docs/security/policy-consent.md) for the security architecture.
 
 ## Self-explanatory tool failures
 
@@ -98,7 +117,7 @@ CapApp authors get this behavior through the common registry helpers. See [AGENT
                     ▼
      ┌─────────────────────────────────────┐
      │            Android Hub              │
-     │ MCP gateway / discovery / routing   │
+     │ MCP gateway / discovery / policy    │
      │                                     │
      │  localhost MCP: 127.0.0.1:8379     │
      │  authenticated developer access     │
@@ -123,22 +142,23 @@ The modern path includes:
 - cache hints;
 - standard MCP tool annotations;
 - modern server identity metadata;
-- JSON responses for modern requests.
+- JSON responses for modern requests;
+- `input_required` confirmation for policy-gated tool calls.
 
 The initialize-era path remains a compatibility surface during migration.
 
 ## Included CapApps
 
-| CapApp | Package | Current rebuilt transport | Role |
-|---|---|---|---|
-| **Files** | `com.llmintentions.files` | Binder v1 | Scoped/sandboxed file operations |
-| **Files Dev** | `com.llmintentions.files.dev` | Binder v1 | Broad development filesystem operations |
-| **Notify** | `com.llmintentions.notify` | Binder v1 | Notification read/post/reply workflows |
-| **People** | `com.llmintentions.people` | Binder v1 | Contacts and calendar capabilities |
-| **Device** | `com.llmintentions.device` | Binder v1 | Sensors, TTS, vibration, clipboard |
-| **Taichi** | `com.taichi.android` | Binder v1 | Paper crypto trading, market/on-chain analysis |
+| CapApp | Package | Role |
+|---|---|---|
+| **Files** | `com.llmintentions.files` | Scoped/sandboxed file operations |
+| **Files Dev** | `com.llmintentions.files.dev` | Broad development filesystem operations |
+| **Notify** | `com.llmintentions.notify` | Notification read/post/reply workflows |
+| **People** | `com.llmintentions.people` | Contacts and calendar capabilities |
+| **Device** | `com.llmintentions.device` | Sensors, TTS, vibration, clipboard |
+| **Taichi** | `com.taichi.android` | Paper crypto trading, market/on-chain analysis |
 
-The Hub Apps screen shows the detected transport for each installed provider (`Binder v1` or `Legacy v0`) and performs a transport-aware health check. The exact tool count evolves quickly; query `tools/list` or use the Hub UI rather than treating a README count as authoritative.
+The exact tool count evolves quickly; query `tools/list` or use the Hub UI rather than treating a README count as authoritative.
 
 ## Built-in Hub capabilities
 
@@ -155,9 +175,9 @@ Install:
 - the LLM Intentions Hub APK;
 - one or more CapApp APKs.
 
-For Binder v1 first-party builds, the Hub and bundled CapApps must use signing identities Android considers a match. See [`docs/release-signing.md`](docs/release-signing.md).
-
 Grant only the Android permissions required by the CapApps you intend to use.
+
+For bundled first-party Binder v1 builds, the Hub and CapApps must be signed with identities Android considers a match. Update the Hub before or together with v1-only CapApps.
 
 ### 2. Start the Hub
 
@@ -189,13 +209,15 @@ It has this shape:
 }
 ```
 
-The token is generated on-device and stored in app-private, no-backup storage. Do not publish it, place it in repository files, or reuse it as a future relay credential. The Hub can rotate it; rotation immediately revokes previously copied configurations.
+The token is generated on-device and stored in app-private, no-backup storage. Do not publish it, place it in repository files, or reuse it as a future relay credential.
+
+Use **Rotate local token** in the dashboard if the credential may have been copied somewhere you no longer trust. Rotation takes effect immediately: previously copied local configs stop authenticating.
 
 ### 4. Verify
 
 Connect an MCP client that can reach the phone's localhost context and call a harmless Hub status/discovery tool. The Hub should return the installed CapApps and their aggregated tools.
 
-On a v1-capable rebuilt installation, the Apps screen should identify the bundled CapApps as **Binder v1** with healthy authenticated descriptor round-trips.
+After installing rebuilt v1 CapApps, the Apps screen should show **Binder v1** rather than **Legacy v0**. A v1 health check is an authenticated Binder descriptor round-trip, so a red v1 provider after upgrade is a signing/trust signal rather than a reason to re-enable the old IPC path.
 
 ## Termux
 
@@ -207,10 +229,10 @@ The former `hub-proxy`/Wi‑Fi workflow should be treated as prototype-era tooli
 
 The current implementation sequence is:
 
-1. **H0 — local transport hardening + MCP modernization** — code/CI hardened; installed-phone smoke test remains.
-2. **H1 — authenticated Binder CapApp IPC** — bundled migration implemented; installed-device trust/signing tests remain.
-3. **H2 — policy, consent, grants, and audit**
-4. **H3 — outbound authenticated Intentions Relay**
+1. **H0 — local transport hardening + MCP modernization** — code/CI complete, device smoke test pending
+2. **H1 — authenticated Binder CapApp IPC** — code/CI complete, installed signing/trust smoke test pending
+3. **H2 — policy, consent, grants, and authorization audit** — code/CI complete, local device smoke test pending
+4. **H3 — outbound authenticated Intentions Relay** — next
 5. **H4 — consumer provider onboarding**
 6. **H5 — aggressive capability expansion**
 
@@ -234,8 +256,6 @@ See:
 - [`spec/capapp-protocol.md`](spec/capapp-protocol.md) for the local CapApp protocol;
 - [`mcp-intent-api/`](mcp-intent-api/) for the Android IPC SDK;
 - [`mcp-core/`](mcp-core/) for the pure-JVM MCP/tool primitives.
-
-New privileged CapApps should use Binder v1. Third-party independently signed CapApps will use the explicit pairing/trust-store path rather than weakening the first-party signer check.
 
 ## Intent Mesh
 
@@ -267,7 +287,7 @@ llm-intentions/
 
 ## Open ecosystem
 
-The protocol is intended to support both open-source and proprietary CapApps. A third-party trust/pairing model is the next Binder-security step so independently signed CapApps do not have to share the first-party signing key.
+The protocol is intended to support both open-source and proprietary CapApps. A third-party trust/pairing model remains a separate Binder-v1 extension so independently signed CapApps do not have to share the first-party signing key.
 
 ## License
 

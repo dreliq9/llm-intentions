@@ -11,12 +11,15 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import com.androidmcp.core.protocol.ToolInfo
+import com.androidmcp.core.protocol.ToolMetadata
 import com.androidmcp.intent.McpIntentConstants
+import com.androidmcp.intent.v1.CapAppToolDescriptor
 import com.androidmcp.intent.v1.ICapAppCallback
 import com.androidmcp.intent.v1.ICapAppService
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -31,6 +34,11 @@ class IntentAppDiscovery(private val context: Context) {
 
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val pendingCallbacks = ConcurrentHashMap<String, CompletableDeferred<List<ToolInfo>>>()
+
+    private data class BinderToolCatalog(
+        val tools: List<ToolInfo> = emptyList(),
+        val metadata: Map<String, ToolMetadata> = emptyMap(),
+    )
 
     fun discover(): List<DiscoveredApp> {
         val v1Services = findToolServices(
@@ -60,14 +68,15 @@ class IntentAppDiscovery(private val context: Context) {
         for ((componentName, rawNamespace) in v1Services) {
             if (componentName.packageName == context.packageName) continue
 
-            val tools = fetchToolsFromBinderService(componentName)
-            if (tools.isNotEmpty()) {
+            val catalog = fetchToolsFromBinderService(componentName)
+            if (catalog.tools.isNotEmpty()) {
                 claimedComponents.add(componentName)
                 apps.add(DiscoveredApp(
                     packageName = componentName.packageName,
                     serviceComponent = componentName,
                     namespace = uniqueNamespace(rawNamespace),
-                    tools = tools,
+                    tools = catalog.tools,
+                    toolMetadata = catalog.metadata,
                     transport = CapAppTransport.BINDER_V1,
                 ))
             }
@@ -84,15 +93,18 @@ class IntentAppDiscovery(private val context: Context) {
                     serviceComponent = componentName,
                     namespace = uniqueNamespace(rawNamespace),
                     tools = tools,
+                    toolMetadata = emptyMap(),
                     transport = CapAppTransport.INTENT_V0,
                 ))
             }
         }
 
         val v1Count = apps.count { it.transport == CapAppTransport.BINDER_V1 }
+        val richMetadataCount = apps.sumOf { it.toolMetadata.size }
         Log.i(
             TAG,
-            "Discovered ${apps.size} CapApps (${v1Count} Binder v1) with ${apps.sumOf { it.tools.size }} tools",
+            "Discovered ${apps.size} CapApps (${v1Count} Binder v1), " +
+                "${apps.sumOf { it.tools.size }} tools, $richMetadataCount rich descriptors",
         )
         return apps
     }
@@ -127,13 +139,18 @@ class IntentAppDiscovery(private val context: Context) {
         return results
     }
 
-    /** Bind to a v1 service, authenticate through Binder, and fetch its in-memory tool catalog. */
-    private fun fetchToolsFromBinderService(component: ComponentName): List<ToolInfo> {
+    /**
+     * Bind to a v1 service, authenticate through Binder, and fetch its in-memory tool catalog.
+     *
+     * H2 CapApps return CapAppToolDescriptor v1. For rolling upgrades, the Hub also accepts the
+     * earlier H1 Binder payload (List<ToolInfo>) and treats its missing rich metadata conservatively.
+     */
+    private fun fetchToolsFromBinderService(component: ComponentName): BinderToolCatalog {
         return try {
             runBlocking {
                 withTimeoutOrNull(BINDER_DISCOVERY_TIMEOUT_MS) {
                     val serviceDeferred = CompletableDeferred<ICapAppService>()
-                    val toolsDeferred = CompletableDeferred<List<ToolInfo>>()
+                    val toolsDeferred = CompletableDeferred<BinderToolCatalog>()
 
                     val connection = object : ServiceConnection {
                         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -173,25 +190,16 @@ class IntentAppDiscovery(private val context: Context) {
                         this.component = component
                     }
                     val bound = context.bindService(bindIntent, connection, Context.BIND_AUTO_CREATE)
-                    if (!bound) return@withTimeoutOrNull emptyList()
+                    if (!bound) return@withTimeoutOrNull BinderToolCatalog()
 
                     try {
                         val service = serviceDeferred.await()
-                        // This small authenticated call also proves the Binder surface is v1.
                         service.descriptorJson
 
                         val callback = object : ICapAppCallback.Stub() {
                             override fun onTools(toolsJson: String?) {
                                 if (toolsDeferred.isCompleted) return
-                                val tools = if (toolsJson != null) {
-                                    try {
-                                        json.decodeFromString<List<ToolInfo>>(toolsJson)
-                                    } catch (e: Exception) {
-                                        Log.w(TAG, "Failed to parse Binder tools from ${component.packageName}", e)
-                                        emptyList()
-                                    }
-                                } else emptyList()
-                                toolsDeferred.complete(tools)
+                                toolsDeferred.complete(parseBinderToolCatalog(component, toolsJson))
                             }
 
                             override fun onResult(requestId: String?, resultJson: String?) = Unit
@@ -199,7 +207,7 @@ class IntentAppDiscovery(private val context: Context) {
                             override fun onError(requestId: String?, code: Int, message: String?) {
                                 if (!toolsDeferred.isCompleted) {
                                     Log.w(TAG, "Binder discovery error from $component: $code $message")
-                                    toolsDeferred.complete(emptyList())
+                                    toolsDeferred.complete(BinderToolCatalog())
                                 }
                             }
                         }
@@ -209,14 +217,43 @@ class IntentAppDiscovery(private val context: Context) {
                     } finally {
                         try { context.unbindService(connection) } catch (_: Exception) { }
                     }
-                } ?: emptyList()
+                } ?: BinderToolCatalog()
             }
         } catch (e: SecurityException) {
             Log.w(TAG, "Binder CapApp rejected Hub identity for ${component.packageName}: ${e.message}")
-            emptyList()
+            BinderToolCatalog()
         } catch (e: Exception) {
             Log.w(TAG, "Failed Binder discovery for ${component.packageName}: ${e.message}")
-            emptyList()
+            BinderToolCatalog()
+        }
+    }
+
+    private fun parseBinderToolCatalog(component: ComponentName, toolsJson: String?): BinderToolCatalog {
+        if (toolsJson.isNullOrBlank()) return BinderToolCatalog()
+
+        try {
+            val descriptors = json.decodeFromString(
+                ListSerializer(CapAppToolDescriptor.serializer()),
+                toolsJson,
+            )
+            return BinderToolCatalog(
+                tools = descriptors.map { it.tool },
+                metadata = descriptors.associate { it.tool.name to it.metadata },
+            )
+        } catch (_: Exception) {
+            // Rolling-upgrade compatibility with the H1 Binder payload.
+        }
+
+        return try {
+            val tools = json.decodeFromString(ListSerializer(ToolInfo.serializer()), toolsJson)
+            Log.i(
+                TAG,
+                "${component.packageName} uses H1 Binder descriptors; policy metadata defaults to unknown",
+            )
+            BinderToolCatalog(tools = tools)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse Binder tools from ${component.packageName}", e)
+            BinderToolCatalog()
         }
     }
 

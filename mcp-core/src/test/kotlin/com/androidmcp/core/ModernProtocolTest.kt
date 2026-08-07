@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ModernProtocolTest {
@@ -135,11 +136,50 @@ class ModernProtocolTest {
     }
 
     @Test
-    fun `textTool maps legacy safety metadata to conservative MCP annotations`() {
-        val readRegistry = ToolRegistry()
-        readRegistry.textTool(
+    fun `explicit read metadata maps to read-only MCP annotation`() {
+        val registry = ToolRegistry()
+        registry.textTool(
             name = "safe_read",
             description = "Test read",
+            params = jsonSchema { },
+            metadata = toolMetadata {
+                mutation = MutationClass.READ_ONLY
+                sensitiveData = SensitiveDataClass.NONE
+            },
+        ) { "ok" }
+
+        val annotations = assertNotNull(registry.list().single().annotations)
+        assertTrue(annotations.readOnlyHint == true)
+        assertNull(annotations.destructiveHint)
+        assertNull(annotations.idempotentHint)
+    }
+
+    @Test
+    fun `explicit mutation maps to conservative MCP write annotations`() {
+        val registry = ToolRegistry()
+        registry.textTool(
+            name = "dangerous_write",
+            description = "Test mutation",
+            params = jsonSchema { },
+            metadata = toolMetadata {
+                mutation = MutationClass.MUTATING
+                destructive = true
+                idempotent = false
+            },
+        ) { "ok" }
+
+        val annotations = assertNotNull(registry.list().single().annotations)
+        assertFalse(annotations.readOnlyHint == true)
+        assertTrue(annotations.destructiveHint == true)
+        assertFalse(annotations.idempotentHint == true)
+    }
+
+    @Test
+    fun `unknown mutation metadata does not falsely advertise read-only`() {
+        val registry = ToolRegistry()
+        registry.textTool(
+            name = "legacy_unknown",
+            description = "Old metadata without explicit mutation semantics",
             params = jsonSchema { },
             metadata = toolMetadata {
                 destructive = false
@@ -147,25 +187,9 @@ class ModernProtocolTest {
             },
         ) { "ok" }
 
-        val readAnnotations = assertNotNull(readRegistry.list().single().annotations)
-        assertTrue(readAnnotations.readOnlyHint == true)
-        assertFalse(readAnnotations.destructiveHint == true)
-        assertTrue(readAnnotations.idempotentHint == true)
-
-        val writeRegistry = ToolRegistry()
-        writeRegistry.textTool(
-            name = "dangerous_write",
-            description = "Test mutation",
-            params = jsonSchema { },
-            metadata = toolMetadata {
-                destructive = true
-                idempotent = false
-            },
-        ) { "ok" }
-
-        val writeAnnotations = assertNotNull(writeRegistry.list().single().annotations)
-        assertFalse(writeAnnotations.readOnlyHint == true)
-        assertTrue(writeAnnotations.destructiveHint == true)
-        assertFalse(writeAnnotations.idempotentHint == true)
+        val annotations = assertNotNull(registry.list().single().annotations)
+        assertNull(annotations.readOnlyHint)
+        assertNull(annotations.destructiveHint)
+        assertNull(annotations.idempotentHint)
     }
 }

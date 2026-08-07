@@ -1,19 +1,28 @@
-# Progress Log
+# LLM Intentions — Progress
 
-## 2026-03-29 — Planning session
+## 2026-08-07
 
-### Completed
-- Researched full Android Intent/API catalog for agent capabilities
-- Designed 4 tool apps: device, people, files, notify
-- Defined all tools per app with APIs and permission requirements
-- Documented reference pattern from Taichi
-- Created task_plan.md, findings.md, progress.md
+### H0 — local transport hardening + MCP modernization
+- Implemented on `agent/trusted-modern-mcp` / PR #2.
+- Loopback-only authenticated Hub endpoint, token rotation/revocation, Origin/request hardening, MCP 2026-07-28 dual-era compatibility, CI baseline.
+- Code/CI green; installed-phone bearer and rotation smoke test remains.
 
-### Key decisions
-- textTool helper moves to mcp-intent-api (shared across all tool apps)
-- Package naming: com.llmintentions.{device,people,files,notify}
-- Sensors use one-shot read pattern (register → read → unregister)
-- Notification tool app is premium tier feature
+### H1 — authenticated Binder CapApp IPC
+- Implemented on `agent/trusted-capapp-ipc` / PR #3.
+- Binder/AIDL v1, Hub package + signer trust, v0 fail-closed SDK default, all bundled CapApps migrated, transport-aware health/UI.
+- Code/CI green across Hub, SDK, and all bundled CapApps; physical-device signing/trust smoke test remains.
 
-### Next
-- Phase 1: Build tool-device module (15 tools, zero permissions)
+### H2 — deterministic policy and consent
+- Implemented on `agent/policy-consent` / PR #4.
+- Explicit mutation/sensitivity/confirmation metadata, rich Binder descriptors, shared dispatcher authorization, persisted grants, MCP input_required confirmation, HMAC-bound one-time state, bounded pending-confirmation store, and app-private authorization audit.
+- Full `:mcp-core:test` and bundled Hub/SDK/CapApp assembly passed on code head `76182520d6e4a831f6c3757015b4684e5949171c`.
+- Local on-device policy compatibility smoke test remains.
+
+### Next: H3 — outbound authenticated Intentions Relay
+- Build from the final green H2 stack.
+- One-time device enrollment with proof of possession.
+- Android Keystore device signing identity.
+- Outbound WSS client attached to the Hub foreground-service lifetime.
+- Relay challenge authentication, bounded frames/in-flight work, no offline tool queue.
+- Relay-verified provider identity enters H2 only as `REMOTE_PROVIDER`.
+- Provider-facing MCP remains synthetic/harmless until end-to-end device tests pass.

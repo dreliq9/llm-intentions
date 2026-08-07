@@ -3,19 +3,13 @@ package com.androidmcp.core.registry
 import com.androidmcp.core.protocol.*
 import kotlinx.serialization.json.*
 
-/**
- * A registered MCP tool with its metadata and handler function.
- */
+/** A registered MCP tool with its metadata and handler function. */
 data class McpToolDef(
     val info: ToolInfo,
     val metadata: ToolMetadata? = null,
     val handler: suspend (JsonObject) -> ToolCallResult,
 )
 
-/**
- * Registry that holds all MCP tools. Thread-safe via ConcurrentHashMap.
- * Individual operations are atomic; compound clear+repopulate is not.
- */
 class ToolRegistry {
     private val tools = java.util.concurrent.ConcurrentHashMap<String, McpToolDef>()
 
@@ -36,12 +30,12 @@ class ToolRegistry {
     /** Stable ordering improves MCP list caching and upstream LLM prompt-cache reuse. */
     fun list(): List<ToolInfo> = tools.values.map { it.info }.sortedBy { it.name }
 
+    /** Full definitions for trusted local descriptor/policy plumbing. */
+    fun definitions(): List<McpToolDef> = tools.values.sortedBy { it.info.name }
+
     fun size(): Int = tools.size
 }
 
-/**
- * DSL builder for JSON Schema objects used in tool inputSchema.
- */
 class JsonSchemaBuilder {
     private val properties = mutableMapOf<String, JsonObject>()
     private val required = mutableListOf<String>()
@@ -96,29 +90,33 @@ class JsonSchemaBuilder {
     }
 }
 
-fun jsonSchema(block: JsonSchemaBuilder.() -> Unit): JsonObject {
-    return JsonSchemaBuilder().apply(block).build()
-}
+fun jsonSchema(block: JsonSchemaBuilder.() -> Unit): JsonObject =
+    JsonSchemaBuilder().apply(block).build()
 
 /**
- * The existing LLM Intentions metadata predates MCP ToolAnnotations and uses
- * `destructive` as the project's confirmation/side-effect flag: false for reads,
- * true for operations that mutate device/user state. Preserve that meaning during
- * migration by explicitly publishing readOnlyHint as its inverse. Marking every
- * current write as destructive is intentionally conservative until Descriptor v1
- * separates mutating/additive/destructive semantics.
+ * MCP ToolAnnotations are client-facing hints, not the authorization source of truth. Derive them
+ * only when our richer metadata has an explicit semantic answer. UNKNOWN deliberately leaves the
+ * hint absent so MCP's pessimistic defaults apply rather than falsely labelling a mutation as read.
  */
 private fun ToolMetadata.toMcpAnnotations(): ToolAnnotations = ToolAnnotations(
-    readOnlyHint = !destructive,
-    destructiveHint = destructive,
-    idempotentHint = idempotent,
+    readOnlyHint = when (mutation) {
+        MutationClass.READ_ONLY -> true
+        MutationClass.MUTATING -> false
+        MutationClass.UNKNOWN -> null
+    },
+    destructiveHint = when {
+        mutation == MutationClass.READ_ONLY -> null
+        destructive -> true
+        mutation == MutationClass.MUTATING -> false
+        else -> null
+    },
+    idempotentHint = when (mutation) {
+        MutationClass.MUTATING -> idempotent
+        MutationClass.READ_ONLY, MutationClass.UNKNOWN -> null
+    },
+    openWorldHint = openWorld,
 )
 
-/**
- * Register a tool whose handler returns a raw String. The string is wrapped in an
- * OK envelope and rendered as MCP text content. On uncaught exception, the framework
- * (ToolAppService) converts it to a FAIL envelope using the failure_modes in metadata.
- */
 fun ToolRegistry.textTool(
     name: String,
     description: String,
@@ -148,10 +146,6 @@ fun ToolRegistry.textTool(
     ))
 }
 
-/**
- * Register a tool whose handler produces an Envelope directly — useful when the tool
- * wants to emit a recoverable WARN or a specific FAIL with hint, rather than throwing.
- */
 fun ToolRegistry.envelopeTool(
     name: String,
     description: String,
@@ -177,16 +171,16 @@ fun ToolRegistry.envelopeTool(
     ))
 }
 
-/**
- * DSL builder for ToolMetadata. Use via `toolMetadata { ... }`.
- *
- * Supports destructive/idempotent/latencyClass assignment, permission() / failureMode()
- * accumulators, and an example() builder that captures args as a JsonObject.
- */
+/** DSL builder for trusted LLM Intentions policy metadata. */
 class ToolMetadataBuilder {
     var destructive: Boolean = false
     var idempotent: Boolean = true
     var latencyClass: LatencyClass = LatencyClass.FAST
+    var mutation: MutationClass = MutationClass.UNKNOWN
+    var sensitiveData: SensitiveDataClass = SensitiveDataClass.UNKNOWN
+    var confirmation: ConfirmationMode = ConfirmationMode.POLICY
+    var openWorld: Boolean? = null
+
     private val permissions = mutableListOf<String>()
     private val failureModes = mutableListOf<FailureMode>()
     private val examples = mutableListOf<ToolExample>()
@@ -226,6 +220,10 @@ class ToolMetadataBuilder {
         idempotent = idempotent,
         latencyClass = latencyClass,
         failureModes = failureModes.toList(),
+        mutation = mutation,
+        sensitiveData = sensitiveData,
+        confirmation = confirmation,
+        openWorld = openWorld,
     )
 }
 
