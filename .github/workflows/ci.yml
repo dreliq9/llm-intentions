@@ -39,4 +39,6 @@ jobs:
           :tool-device:assembleDebug
           :tool-notify:assembleDebug
           :tool-people:assembleDebug
+          :tool-files:assembleDebug
           :tool-files-dev:assembleDebug
+          :taichi-android:assembleDebug
