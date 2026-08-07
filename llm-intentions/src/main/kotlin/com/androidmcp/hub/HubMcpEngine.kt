@@ -19,26 +19,20 @@ import com.androidmcp.hub.intents.IntentScanner
 import com.androidmcp.hub.intents.IntentToolDefinitions
 import com.androidmcp.hub.meta.HubMetaTools
 import com.androidmcp.hub.routing.IntentToolRouter
+import com.androidmcp.hub.security.HubToolAuthorizer
 import com.androidmcp.hub.system.DeviceControlTools
 import com.androidmcp.hub.system.NotificationTools
 import com.androidmcp.hub.system.SystemToolDefinitions
 import java.util.concurrent.Executors
 
-/**
- * Core Hub orchestration — extracted from HubMcpProvider.
- *
- * Plain class (not a ContentProvider) that takes a Context, discovers apps,
- * registers all tools, and produces a configured McpDispatcher.
- *
- * Used by HubStdioService as the single source of truth for the Hub's
- * MCP capabilities.
- */
+/** Core Hub orchestration and the single registry/dispatcher source of truth. */
 class HubMcpEngine(private val context: Context) {
 
     val registry = ToolRegistry()
     val discovery = IntentAppDiscovery(context)
     val intentEngine = IntentEngine(context)
     val healthMonitor = IntentHealthMonitor(context)
+    val toolAuthorizer = HubToolAuthorizer(context)
 
     private val router = IntentToolRouter(context)
     private val refreshExecutor = Executors.newSingleThreadExecutor { r ->
@@ -53,12 +47,6 @@ class HubMcpEngine(private val context: Context) {
     lateinit var dispatcher: McpDispatcher
         private set
 
-    /**
-     * Initialize the engine: discover apps, register tools, create dispatcher.
-     */
-    /**
-     * Re-discover apps and rebuild the tool registry.
-     */
     fun refresh() {
         populateRegistry()
     }
@@ -68,38 +56,31 @@ class HubMcpEngine(private val context: Context) {
         registerPackageReceiver()
 
         dispatcher = McpDispatcher(
-            serverInfo = Implementation("LLM Intentions", "0.5.0"),
+            serverInfo = Implementation("LLM Intentions", "0.6.0"),
             toolRegistry = registry,
-            instructions = buildInstructions()
+            toolAuthorizer = toolAuthorizer,
+            instructions = buildInstructions(),
         )
     }
 
     @Synchronized
     private fun populateRegistry() {
-        // Phase 1: Discover Intent-based tool apps
         val newApps = discovery.discover()
 
-        // Phase 2: Clear and rebuild
         registry.clear()
         discoveredApps = newApps
 
-        // Register proxied tools from discovered apps (via Intent)
         router.registerProxyTools(registry, newApps)
 
-        // Android capability tools (existing)
         IntentToolDefinitions(context).registerAll(registry)
         IntentScanner(context).registerDiscovered(registry)
         FileShareTools(context).registerAll(registry)
-
-        // Generic Intent tools (new — universal Intent interface)
         GenericIntentTools(context, intentEngine).registerAll(registry)
 
-        // System tools
         SystemToolDefinitions(context).registerAll(registry)
         DeviceControlTools(context).registerAll(registry)
         NotificationTools(context).registerAll(registry)
 
-        // Hub meta-tools
         HubMetaTools(
             healthMonitor = healthMonitor,
             getDiscoveredApps = { discoveredApps },
@@ -114,31 +95,33 @@ class HubMcpEngine(private val context: Context) {
             }
         ).registerAll(registry)
 
-        // Inbox tools
         InboxTools().registerAll(registry)
 
-        // Update instructions if dispatcher already exists
         if (::dispatcher.isInitialized) {
             dispatcher.instructions = buildInstructions()
         }
     }
 
     private fun buildInstructions(): String = buildString {
-        appendLine("LLM Intentions v0.5.0 — universal Intent gateway for Android.")
-        appendLine("Transport: streamable-http on localhost:8379/mcp.")
+        appendLine("LLM Intentions v0.6.0 — trusted Android capability gateway.")
+        appendLine("Local developer transport: authenticated streamable-http on 127.0.0.1:8379/mcp.")
+        appendLine("Remote provider calls must arrive through a transport-authenticated principal and Hub policy.")
         appendLine()
         appendLine("Tools are namespaced by source:")
         appendLine("  - android.* — Share, Intent dispatch, maps, dialer, calendar, deep links, query apps")
         appendLine("  - system.* — Battery, clipboard, wifi, volume, notifications, torch, vibrate, media, brightness, ringer, toast")
-        appendLine("  - hub.* — Status, health, refresh, inbox (messages from Android apps)")
+        appendLine("  - hub.* — Status, health, refresh, inbox")
         for (app in discoveredApps) {
-            appendLine("  - ${app.namespace}.* — ${app.packageName} (${app.tools.size} tools)")
+            appendLine(
+                "  - ${app.namespace}.* — ${app.packageName} (${app.tools.size} tools, ${app.transport})"
+            )
         }
         appendLine()
         appendLine("Total: ${registry.size()} tools from ${discoveredApps.size + 3} sources")
         appendLine()
-        appendLine("Use android.send_intent to send arbitrary Intents to any Android app.")
-        appendLine("Use android.query_intent to discover what apps handle a given action.")
+        appendLine("Tool annotations are hints; deterministic Hub authorization is the execution gate.")
+        appendLine("Use android.send_intent only when the requested Android action is explicit and appropriate.")
+        appendLine("Use android.query_intent to discover available handlers.")
         val inboxCount = InboxManager.size()
         if (inboxCount > 0) {
             appendLine("  ** $inboxCount unread message(s) in inbox **")
