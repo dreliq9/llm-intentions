@@ -5,6 +5,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.net.URI
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 @Serializable
 data class RelayEnrollment(
@@ -37,10 +39,29 @@ class RelayEnrollmentStore(context: Context) {
         requireSecureRelayBaseUrl(enrollment.relayBaseUrl)
         file.parentFile?.mkdirs()
         val temp = File(file.parentFile, "$FILE_NAME.tmp")
-        temp.writeText(json.encodeToString(RelayEnrollment.serializer(), enrollment), Charsets.UTF_8)
-        if (!temp.renameTo(file)) {
+        try {
+            temp.writeText(
+                json.encodeToString(RelayEnrollment.serializer(), enrollment),
+                Charsets.UTF_8,
+            )
+            try {
+                Files.move(
+                    temp.toPath(),
+                    file.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE,
+                )
+            } catch (_: Exception) {
+                // Some Android filesystems do not advertise ATOMIC_MOVE. Replacement is still
+                // required so toggling enabled state and replacing enrollment works reliably.
+                Files.move(
+                    temp.toPath(),
+                    file.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            }
+        } finally {
             temp.delete()
-            error("Unable to atomically save relay enrollment")
         }
     }
 
