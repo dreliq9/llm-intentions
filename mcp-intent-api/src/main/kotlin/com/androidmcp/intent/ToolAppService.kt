@@ -10,8 +10,10 @@ import com.androidmcp.core.protocol.Envelope
 import com.androidmcp.core.protocol.EnvelopeStatus
 import com.androidmcp.core.protocol.ToolCallResult
 import com.androidmcp.core.protocol.ToolInfo
+import com.androidmcp.core.protocol.ToolMetadata
 import com.androidmcp.core.registry.ToolRegistry
 import com.androidmcp.intent.v1.CapAppCallerTrustPolicy
+import com.androidmcp.intent.v1.CapAppToolDescriptor
 import com.androidmcp.intent.v1.ICapAppCallback
 import com.androidmcp.intent.v1.ICapAppService
 import com.androidmcp.intent.v1.OfficialHubSameSignerTrustPolicy
@@ -58,6 +60,7 @@ abstract class ToolAppService : Service() {
             enforceTrustedBinderCaller()
             return buildJsonObject {
                 put("protocolVersion", McpIntentConstants.CAPAPP_PROTOCOL_V1)
+                put("toolDescriptorVersion", TOOL_DESCRIPTOR_VERSION)
                 put("transport", "binder")
                 put("toolCount", registry.size())
             }.toString()
@@ -66,7 +69,17 @@ abstract class ToolAppService : Service() {
         override fun listTools(callback: ICapAppCallback?) {
             enforceTrustedBinderCaller()
             requireNotNull(callback) { "callback is required" }
-            val toolsJson = json.encodeToString(ListSerializer(ToolInfo.serializer()), registry.list())
+
+            val descriptors = registry.definitions().map { definition ->
+                CapAppToolDescriptor(
+                    tool = definition.info,
+                    metadata = definition.metadata ?: ToolMetadata(),
+                )
+            }
+            val toolsJson = json.encodeToString(
+                ListSerializer(CapAppToolDescriptor.serializer()),
+                descriptors,
+            )
             callback.onTools(toolsJson)
         }
 
@@ -210,6 +223,7 @@ abstract class ToolAppService : Service() {
         )
     }
 
+    /** Legacy v0 intentionally remains ToolInfo-only; rich policy metadata is a v1 feature. */
     private fun handleLegacyListTools(intent: Intent) {
         val callbackId = intent.getStringExtra(McpIntentConstants.EXTRA_CALLBACK_ID)
         val replyTo = intent.getStringExtra(McpIntentConstants.EXTRA_REPLY_TO)
@@ -251,5 +265,6 @@ abstract class ToolAppService : Service() {
     companion object {
         private const val TAG = "MCP-ToolApp"
         private const val ERROR_TOOL_NOT_FOUND = 404
+        private const val TOOL_DESCRIPTOR_VERSION = 1
     }
 }
