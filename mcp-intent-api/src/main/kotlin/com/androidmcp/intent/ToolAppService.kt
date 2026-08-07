@@ -29,9 +29,9 @@ import kotlinx.serialization.json.put
 /**
  * Base Service that tool apps extend to participate in CapApp local IPC.
  *
- * Protocol v1 is an authenticated bound Binder API. Protocol v0 (started service + broadcast
- * reply) remains as an explicit migration path for already-deployed CapApps and can be disabled
- * per service with [legacyIntentProtocolEnabled].
+ * Protocol v1 is the secure default: an authenticated bound Binder API. Protocol v0 (started
+ * service + broadcast reply) remains only as an explicit migration option and must be enabled by
+ * a subclass that knowingly accepts its weaker trust model.
  */
 abstract class ToolAppService : Service() {
 
@@ -42,11 +42,8 @@ abstract class ToolAppService : Service() {
     /** Override with an explicit trust-store policy when third-party Hub pairing is supported. */
     protected open val callerTrustPolicy: CapAppCallerTrustPolicy = OfficialHubSameSignerTrustPolicy
 
-    /**
-     * Migration switch for the unauthenticated v0 Intent/broadcast protocol.
-     * New first-party CapApps should set this to false once their Hub path uses Binder v1.
-     */
-    protected open val legacyIntentProtocolEnabled: Boolean = true
+    /** Fail closed: legacy unauthenticated Intent/broadcast execution is opt-in only. */
+    protected open val legacyIntentProtocolEnabled: Boolean = false
 
     override fun onCreate() {
         super.onCreate()
@@ -69,7 +66,6 @@ abstract class ToolAppService : Service() {
         override fun listTools(callback: ICapAppCallback?) {
             enforceTrustedBinderCaller()
             requireNotNull(callback) { "callback is required" }
-
             val toolsJson = json.encodeToString(ListSerializer(ToolInfo.serializer()), registry.list())
             callback.onTools(toolsJson)
         }
@@ -80,9 +76,6 @@ abstract class ToolAppService : Service() {
             argumentsJson: String?,
             callback: ICapAppCallback?,
         ) {
-            // Capture and authorize the Binder caller before hopping to a coroutine. Once work is
-            // dispatched to another thread Binder.getCallingUid() no longer represents the remote
-            // transaction that invoked this method.
             enforceTrustedBinderCaller()
 
             require(!requestId.isNullOrBlank()) { "requestId is required" }
